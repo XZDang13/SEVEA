@@ -98,7 +98,7 @@ class Collector:
         self.critic.load_state_dict(critic_weight)
         
     def setup_env(self, task_name:str, seed:int) -> gymnasium.Env:
-        env = setup_metaworld_env(task_name, False, seed, "rgb_array")
+        env = setup_metaworld_env(task_name, seed, "rgb_array")
         env = gymnasium.wrappers.AddRenderObservation(env, render_only=False)
         env = gymnasium.wrappers.FrameStackObservation(env, 2)
 

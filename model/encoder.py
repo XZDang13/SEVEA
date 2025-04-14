@@ -65,7 +65,7 @@ class EncoderNet(nn.Module):
         layers = []
 
         for dim in hidden_dims:
-            mlp = MLPLayer(in_dim, dim, F.tanh, True)
+            mlp = MLPLayer(in_dim, dim, F.silu, True)
             in_dim = dim
 
             layers.append(mlp)
@@ -76,7 +76,7 @@ class EncoderNet(nn.Module):
     def forward(self, x:torch.Tensor, drop_out:bool=False) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x)
-
-        x = F.dropout(x, 0.25, training=drop_out)
+        
+            x = F.dropout(x, 0.1, training=drop_out)
         
         return x

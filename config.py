@@ -6,8 +6,8 @@ DRAWEROPEN = {
     "env_name": "drawer-open-v2-goal-observable"
 }
 
-PUSH = {
-    "env_name": "push-v2-goal-observable"
+PICKPLACE = {
+    "env_name": "pick-place-v2-goal-observable"
 }
 
 PUSHBACK = {
@@ -21,7 +21,7 @@ WINDOWOPEN = {
 CFGS = {
     "buttonpress": BUTTONPRESS,
     "draweropen": DRAWEROPEN,
-    "push": PUSH,
+    "pickplace": PICKPLACE,
     "windowopen": WINDOWOPEN,
     "pushback": PUSHBACK
 }

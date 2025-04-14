@@ -19,7 +19,7 @@ DEFAULT_CAMERA_CONFIG = {
 DEFAULT_SIZE=112
 
 class VisualWrapper(gymnasium.Wrapper):
-    def __init__(self, env: Env, motion_detector, seed, visual=False):
+    def __init__(self, env: Env, motion_detector, seed):
         super().__init__(env)
 
         self.unwrapped.model.vis.global_.offwidth = DEFAULT_SIZE
@@ -68,11 +68,11 @@ class VisualWrapper(gymnasium.Wrapper):
 
         return vector_obs, reward, done, truncate, info
     
-def setup_metaworld_env(task_name:str, visual:bool, seed:int, render_mode:str="rgb_array"):
+def setup_metaworld_env(task_name:str, seed:int, render_mode:str="rgb_array"):
     cfgs = CFGS[task_name]
     env_cls = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[cfgs["env_name"]]
     
     motion_detector = get_motion_detecor(task_name)
-    env = VisualWrapper(env_cls(render_mode=render_mode), motion_detector, seed, visual)
+    env = VisualWrapper(env_cls(render_mode=render_mode), motion_detector, seed)
     
     return env

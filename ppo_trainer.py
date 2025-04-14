@@ -72,7 +72,7 @@ class Trainer:
         self.regularization_weight = config["regularization_weight"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
-        env = setup_metaworld_env(task_name, False, seed, render_mode)
+        env = setup_metaworld_env(task_name, seed, render_mode)
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
 
         return env
