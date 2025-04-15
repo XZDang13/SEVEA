@@ -9,10 +9,6 @@ class FrameObservationEncoderNet(nn.Module):
         super().__init__()
         
         self.dim = feature_dim
-        
-        #self.cnn_layers = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v3_large', pretrained=True)
-        #self.cnn_layers.features[0][0].weight.data = self.cnn_layers.features[0][0].weight.data.repeat(1, 2, 1, 1) / 2
-        #self.cnn_layers.classifier = nn.Identity()
 
         self.cnn_layers = nn.Sequential(
             Conv2DLayer(in_channel, 64, 3, 2, 1, F.silu, True),
@@ -77,6 +73,6 @@ class EncoderNet(nn.Module):
         for layer in self.layers:
             x = layer(x)
         
-            x = F.dropout(x, 0.1, training=drop_out)
+        x = F.dropout(x, 0.25, training=drop_out)
         
         return x
