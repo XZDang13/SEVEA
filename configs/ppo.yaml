@@ -2,17 +2,13 @@ num_envs: 20
 max_steps: 100
 epochs: 100
 eval_frequence: 20
-observation_encoder_layers:
-  - 256
+num_blocks: 12
 encoder_layers:
-  - 256
   - 256
 actor_layers:
   - 256
   - 256
-  - 256
 value_layers:
-  - 256
   - 256
   - 256
 learning_rate: 3.0e-4

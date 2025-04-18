@@ -14,7 +14,7 @@ from RLAlg.buffer.rollout_buffer import RolloutBuffer
 
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
-from model.encoder import VectorObservationEncoderNet, EncoderNet
+from model.encoder import EncoderNet
 from model.actor import PPOActorNet
 from model.critic import ValueNet
 
@@ -47,8 +47,7 @@ class Trainer:
         obs_dim = self.train_envs.single_observation_space.shape
         action_dim = self.train_envs.single_action_space.shape
         
-        observation_encoder = VectorObservationEncoderNet(np.prod(obs_dim), config["observation_encoder_layers"])
-        self.encoder = EncoderNet(observation_encoder, config["encoder_layers"]).to(self.device)
+        self.encoder = EncoderNet(np.prod(obs_dim), config["num_blocks"], config["encoder_layers"]).to(self.device)
         self.actor = PPOActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
         self.critic = ValueNet(self.encoder.dim, config["value_layers"]).to(self.device)
 
@@ -154,11 +153,11 @@ class Trainer:
         print(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
     
     def train(self):
-        for epoch in range(10):
+        for epoch in range(self.epochs):
             self.rollout()
             self.update(self.update_iteration, self.batch_size)
             
-            if (epoch + 1) % 5 == 0:
+            if (epoch + 1) % self.eval_frequence == 0:
                 episode_reward, episode_success_rate = self.eval()
                 self.log(epoch+1, episode_reward, episode_success_rate)
                 torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ppo/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")

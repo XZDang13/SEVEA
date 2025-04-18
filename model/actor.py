@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from RLAlg.nn.layers import GuassianHead, DeterminicHead, SquashedGaussianHead, make_mlp_layers
+from RLAlg.nn.layers import GuassianHead, DeterminicHead, SquashedGaussianHead, make_mlp_layers, MLPLayer
 from RLAlg.distribution import TruncatedNormal
 
 class PPOActorNet(nn.Module):
     def __init__(self, feature_dim:int, action_dim:int, hidden_dims:list[int], max_action:float=1):
         super().__init__()
 
-        self.layers, dim = make_mlp_layers(feature_dim, hidden_dims, F.silu, True)
+        self.layers, dim = make_mlp_layers(hidden_dims[0], hidden_dims, F.silu, True)
 
         self.policy = GuassianHead(dim, action_dim, max_action)
 
@@ -30,7 +30,7 @@ class DDPGActorNet(nn.Module):
 
     def forward(self, x:torch.Tensor, std:float) -> TruncatedNormal:
         x = self.layers(x)
-
+        
         action = self.policy(x)
         std = torch.ones_like(action) * std
         dist = TruncatedNormal(action, std, -self.max_action, self.max_action)

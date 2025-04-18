@@ -14,7 +14,7 @@ from RLAlg.alg.ddpg_double_q import DDPGDoubleQ
 from RLAlg.utils import set_seed_everywhere
 from RLAlg.buffer.replay_buffer import ReplayBuffer
 
-from model.encoder import EncoderNet
+from model.encoder import FrameObservationEncoderNet
 from model.actor import DDPGActorNet
 from model.critic import CriticNet
 
@@ -47,7 +47,7 @@ class Trainer:
         obs_dim = self.train_envs.single_observation_space.shape
         action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = EncoderNet(np.prod(obs_dim), config["num_blocks"], config["encoder_layers"]).to(self.device)
+        self.encoder = FrameObservationEncoderNet(6, 128).to(self.device)
         self.actor = DDPGActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
         self.critic = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
         self.critic_target = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
