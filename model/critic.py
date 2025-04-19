@@ -7,7 +7,7 @@ from RLAlg.nn.layers import CriticHead, make_mlp_layers, MLPLayer
 class ValueNet(nn.Module):
     def __init__(self, feature_dim:int, hidden_dims:list[int]):
         super().__init__()
-        self.layers, dim = make_mlp_layers(hidden_dims[0], hidden_dims, F.silu, True)
+        self.layers, dim = make_mlp_layers(feature_dim, hidden_dims, F.silu, True)
 
         self.value = CriticHead(dim)
 

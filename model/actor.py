@@ -9,7 +9,7 @@ class PPOActorNet(nn.Module):
     def __init__(self, feature_dim:int, action_dim:int, hidden_dims:list[int], max_action:float=1):
         super().__init__()
 
-        self.layers, dim = make_mlp_layers(hidden_dims[0], hidden_dims, F.silu, True)
+        self.layers, dim = make_mlp_layers(feature_dim, hidden_dims, F.silu, True)
 
         self.policy = GuassianHead(dim, action_dim, max_action)
 

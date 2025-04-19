@@ -1,5 +1,5 @@
-BUTTONPRESS = {
-    "env_name": "button-press-topdown-v2-goal-observable"
+HAMMER = {
+    "env_name": "hammer-v2-goal-observable"
 }
 
 DRAWEROPEN = {
@@ -19,7 +19,7 @@ WINDOWOPEN = {
 }
 
 CFGS = {
-    "buttonpress": BUTTONPRESS,
+    "hammer": HAMMER,
     "draweropen": DRAWEROPEN,
     "pickplace": PICKPLACE,
     "windowopen": WINDOWOPEN,
