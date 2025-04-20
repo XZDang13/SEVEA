@@ -6,9 +6,9 @@ python ddpg_trainer.py --task=hammer --seed=200
 python ddpg_trainer.py --task=hammer --seed=400
 python ddpg_trainer.py --task=hammer --seed=600
 
-python ddpg_trainer.py --task=push --seed=200
-python ddpg_trainer.py --task=push --seed=400
-python ddpg_trainer.py --task=push --seed=600
+python ddpg_trainer.py --task=pickplace --seed=200
+python ddpg_trainer.py --task=pickplace --seed=400
+python ddpg_trainer.py --task=pickplace --seed=600
 
 python ddpg_trainer.py --task=pushback --seed=200
 python ddpg_trainer.py --task=pushback --seed=400
