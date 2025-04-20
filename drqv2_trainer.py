@@ -16,7 +16,7 @@ from RLAlg.alg.ddpg_double_q import DDPGDoubleQ
 from RLAlg.utils import set_seed_everywhere
 from RLAlg.buffer.replay_buffer import ReplayBuffer
 
-from model.encoder import FrameObservationEncoderNet, RandomShiftsAug
+from model.encoder import FrameObservationEncoderNet
 from model.actor import DDPGActorNet
 from model.critic import CriticNet
 
@@ -196,11 +196,11 @@ class Trainer:
             if (epoch + 1) % self.eval_frequence == 0:
                 episode_reward, episode_success_rate = self.eval()
                 self.log(epoch+1, episode_reward, episode_success_rate)
-                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
+                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/drqv2/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
         
 if __name__ == '__main__':
     args = get_train_args()
-    weight_folder = f"weights/ddpg/{args.task}"
+    weight_folder = f"weights/drqv2/{args.task}"
         
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
