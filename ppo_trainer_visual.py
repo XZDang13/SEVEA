@@ -170,6 +170,12 @@ class Trainer:
         print(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
     
     def train(self):
+        best_success = 0
+        print("-------------------------------")
+        print(f"task: {self.task_name}, seed: {self.seed}")
+        time = datetime.now()
+        print(f"[{time}] start")
+
         for epoch in range(self.epochs):
             self.rollout()
             self.update(self.update_iteration, self.batch_size)
@@ -178,7 +184,15 @@ class Trainer:
                 episode_reward, episode_success_rate = self.eval()
                 self.log(epoch+1, episode_reward, episode_success_rate)
                 torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ppo_visual/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
-        
+
+                if episode_success_rate > best_success:
+                    best_success = episode_success_rate
+                    torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_best_{self.seed}.pt")
+
+        time = datetime.now()
+        print(f"[{time}] end")
+
+        print("-------------------------------")
         
 if __name__ == '__main__':
     args = get_train_args()
