@@ -86,15 +86,15 @@ class Trainer:
         return rewards
     
     @torch.no_grad()
-    def get_action(self, obs:list[list[float]], determine:bool=False):
-        obs = torch.as_tensor(obs).float().to(self.device)
-        obs = self.encoder(obs)
-        pi, action, log_prob = self.actor(obs)
+    def get_action(self, obs_batch:list[list[float]], determine:bool=False):
+        obs_batch = torch.as_tensor(obs_batch).float().to(self.device)
+        obs_batch = self.encoder(obs_batch)
+        pi, action, log_prob = self.actor(obs_batch)
         
         if determine:
             action = pi.mean
         
-        value = self.critic(obs)
+        value = self.critic(obs_batch)
 
         return action.cpu().tolist(), log_prob.cpu().tolist(), value.cpu().tolist()
     

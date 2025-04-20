@@ -191,7 +191,7 @@ class HAMMER:
 
         is_goal_reached = my_utils.DetectMotion.is_reached(xpos, "object_2", "goal", 0.05)
         is_object_2_reached = my_utils.DetectMotion.is_reached(xpos, "object_1", "object_2", 0.065, offset=[-0.15, -0.05, 0.0])
-        is_object_1_reached = my_utils.DetectMotion.is_reached(xpos, "gripper", "object_1", 0.05, offset=[-0.1, 0, 0])
+        is_object_1_reached = my_utils.DetectMotion.is_reached(xpos, "gripper", "object_1", 0.05, offset=[-0.075, 0, 0])
 
         is_object_2_moving = my_utils.DetectMotion.is_moving(xpos, next_xpos, "object_2", 0.001)
         is_object_2_moving_to_goal = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "object_2", "goal", 0.75)

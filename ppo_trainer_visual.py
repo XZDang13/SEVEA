@@ -10,15 +10,15 @@ import yaml
 from torchvision.transforms import v2
 from einops import rearrange
 
+from RLAlg.alg.ppo import PPO
+from RLAlg.utils import set_seed_everywhere
+from RLAlg.buffer.rollout_buffer import RolloutBuffer
+
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
-from RLAlg.alg.ddpg_double_q import DDPGDoubleQ
-from RLAlg.utils import set_seed_everywhere
-from RLAlg.buffer.replay_buffer import ReplayBuffer
-
-from model.encoder import FrameObservationEncoderNet, RandomShiftsAug
-from model.actor import DDPGActorNet
-from model.critic import CriticNet
+from model.encoder import FrameObservationEncoderNet
+from model.actor import PPOActorNet
+from model.critic import ValueNet
 
 def get_train_args():
     parse = argparse.ArgumentParser()
@@ -30,15 +30,15 @@ def get_train_args():
 class Trainer:
     def __init__(self, task_name:str, seed:int):
         
-        with open("configs/ddpg.yaml", "r") as file:
+        with open("configs/ppo.yaml", "r") as file:
             config = yaml.safe_load(file)
         
         set_seed_everywhere(seed)
         
-        self.seed = seed
-        self.task_name = task_name
-        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        self.task_name = task_name
+        self.seed = seed
         
         self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset, render_mode="rgb_array") for i in range(config["num_envs"])])
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000, render_mode="rgb_array") for i in range(config["num_envs"])])
@@ -55,28 +55,27 @@ class Trainer:
         action_dim = self.train_envs.single_action_space.shape
         
         self.encoder = FrameObservationEncoderNet(6, 128).to(self.device)
-        self.actor = DDPGActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
-        self.critic = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
-        self.critic_target = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.actor = PPOActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
+        self.critic = ValueNet(self.encoder.dim, config["value_layers"]).to(self.device)
 
-        for param in self.critic_target.parameters():
-            param.requires_grad = False
-
-        self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=config["learning_rate"])
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config["learning_rate"])
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
+        self.optimizer = optim.Adam(
+            list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters()), 
+            lr=config["learning_rate"]
+        )
         
-        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], obs_dim, action_dim)
-        self.max_steps = config["max_steps"]
+        self.rollout_buffer = RolloutBuffer(config["num_envs"],  config["max_steps"], obs_dim, action_dim)
+        self.max_steps =  config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]
         self.batch_size = config["batch_size"]
         self.eval_frequence = config["eval_frequence"]
         self.gamma = config["gamma"]
-        self.tau = config["tau"]
+        self.lambda_ = config["lambda_"]
+        self.value_loss_weight = config["value_loss_weight"]
+        self.entropy_weight = config["entropy_weight"]
+        self.max_grad_norm = config["max_grad_norm"]
+        self.clip_ratio = config["clip_ratio"]
         self.regularization_weight = config["regularization_weight"]
-        self.std = config["std"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
         env = setup_metaworld_env(task_name, seed, render_mode)
@@ -101,37 +100,36 @@ class Trainer:
         return obs_batch
     
     @torch.no_grad()
-    def get_action(self, obs_batch, deterministic, random):
-        obs_batch = torch.as_tensor(obs_batch, dtype=torch.float32).to(self.device)
+    def get_action(self, obs_batch:list[list[float]], determine:bool=False):
+        obs_batch = torch.as_tensor(obs_batch).float().to(self.device)
         obs_batch = self.preprpcess(obs_batch)
         obs_batch = self.encoder(obs_batch)
-        dist = self.actor(obs_batch, self.std)
-        if deterministic:
-            action = dist.mean
-        else:    
-            action = dist.sample(clip=None)
+        pi, action, log_prob = self.actor(obs_batch)
+        
+        if determine:
+            action = pi.mean
+        
+        value = self.critic(obs_batch)
 
-            if random:
-                action.uniform_(-1, 1)
-        
-        action = action.cpu().numpy()
-        
-        return action.tolist()
+        return action.cpu().tolist(), log_prob.cpu().tolist(), value.cpu().tolist()
     
     def rollout(self):
         obs, info = self.train_envs.reset()
         for i in range(self.max_steps):
-            action = self.get_action(obs, False, False)
+            action, log_prob, value = self.get_action(obs)
             next_obs, reward, done, timeout, info = self.train_envs.step(action)
             reward = self.get_motion_reward(info["motion"])
-            self.replay_buffer.add_steps(obs, action, reward, done, next_obs)
+            self.rollout_buffer.add_steps(i, obs, action, log_prob, reward, done, value)
             obs = next_obs
+
+        _, _, value = self.get_action(obs)
+        self.rollout_buffer.compute_gae(value, gamma=self.gamma, lambda_=self.lambda_)
         
     def eval(self):
         obs, info = self.eval_envs.reset()
         episode_success = 0
         for i in range(500):
-            action = self.get_action(obs, True, False)
+            action, log_prob, value = self.get_action(obs, True)
             next_obs, reward, done, timeout, info = self.eval_envs.step(action)
             episode_success += info["success"]
             obs = next_obs
@@ -144,42 +142,28 @@ class Trainer:
         
     def update(self, num_iteration:int, batch_size:int):
         for _ in range(num_iteration):
-            batch = self.replay_buffer.sample(batch_size)
-            obs_batch = batch["states"].to(self.device)
-            action_batch = batch["actions"].to(self.device)
-            reward_batch = batch["rewards"].to(self.device)
-            done_batch = batch["dones"].to(self.device)
-            next_obs_batch = batch["next_states"].to(self.device)
+            for batch in self.rollout_buffer.batch_sample(batch_size):
+                obs_batch = batch["states"].to(self.device)
+                action_batch = batch["actions"].to(self.device)
+                log_prob_batch = batch["log_probs"].to(self.device)
+                value_batch = batch["values"].to(self.device)
+                return_batch = batch["returns"].to(self.device)
+                advantage_batch = batch["advantages"].to(self.device)
 
-            obs_batch = self.preprpcess(obs_batch)
-            next_obs_batch = self.preprpcess(next_obs_batch)
+                obs_batch = self.preprpcess(obs_batch)
 
-            feature_batch = self.encoder(obs_batch, True)
-            with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+                feature_batch = self.encoder(obs_batch, False)
+                policy_loss, entropy = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
 
-            self.encoder_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            critic_loss = DDPGDoubleQ.compute_critic_loss(
-                self.actor, self.critic, self.critic_target, feature_batch, action_batch, reward_batch, next_feature_batch, done_batch, self.std, self.gamma
-            )
-            critic_loss.backward()
-            self.critic_optimizer.step()
-            self.encoder_optimizer.step()
+                value_loss = PPO.compute_clipped_value_loss(self.critic, feature_batch, value_batch, return_batch, self.clip_ratio)
+                
+                loss = policy_loss + value_loss * self.value_loss_weight - entropy * self.entropy_weight
 
-            for param in self.critic.parameters():
-                param.requires_grad = False
-
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            actor_loss = DDPGDoubleQ.compute_actor_loss(self.actor, self.critic, feature_batch.detach(), self.std, self.regularization_weight)
-            actor_loss.backward()
-            self.actor_optimizer.step()
-
-            for param in self.critic.parameters():
-                param.requires_grad = True
-
-            DDPGDoubleQ.update_target_param(self.critic, self.critic_target, self.tau)
-    
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]['params'], self.max_grad_norm)
+                self.optimizer.step()
+                
     def log(self, step, avg_reward, avg_success):
         time = datetime.now()
         print(f"[{time}] {step}")
@@ -190,20 +174,18 @@ class Trainer:
             self.rollout()
             self.update(self.update_iteration, self.batch_size)
             
-            mix = np.clip(epoch/self.epochs, 0, 1)
-            self.std = (1-mix) * 1 + mix * 0.1
-            
             if (epoch + 1) % self.eval_frequence == 0:
                 episode_reward, episode_success_rate = self.eval()
                 self.log(epoch+1, episode_reward, episode_success_rate)
-                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
+                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ppo/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
+        
         
 if __name__ == '__main__':
     args = get_train_args()
-    weight_folder = f"weights/ddpg/{args.task}"
+    weight_folder = f"weights/ppo/{args.task}"
         
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
 
     trainer = Trainer(args.task, args.seed)
-    trainer.train()   
+    trainer.train()
