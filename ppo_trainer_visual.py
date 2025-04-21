@@ -63,7 +63,7 @@ class Trainer:
             lr=config["learning_rate"]
         )
         
-        self.rollout_buffer = RolloutBuffer(config["num_envs"],  config["max_steps"], obs_dim, action_dim)
+        self.rollout_buffer = RolloutBuffer(config["num_envs"],  config["max_steps"], obs_dim, action_dim, state_dtype=torch.uint8)
         self.max_steps =  config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]

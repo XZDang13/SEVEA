@@ -67,7 +67,7 @@ class Trainer:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config["learning_rate"])
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
         
-        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], obs_dim, action_dim)
+        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], obs_dim, action_dim, state_dtype=torch.uint8)
         self.max_steps = config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]
