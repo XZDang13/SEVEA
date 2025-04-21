@@ -54,7 +54,7 @@ class Trainer:
         obs_dim = (2, 112, 112, 3)
         action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = FrameObservationEncoderNet(6, 128).to(self.device)
+        self.encoder = FrameObservationEncoderNet(6, 256).to(self.device)
         self.actor = DDPGActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
         self.critic = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
         self.critic_target = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
