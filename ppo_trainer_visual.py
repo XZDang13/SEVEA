@@ -32,7 +32,12 @@ def get_train_args():
 class Trainer:
     def __init__(self, task_name:str, seed:int):
         
-        with open("configs/ppo.yaml", "r") as file:
+        if task_name in METAWORLD_CFGS:
+            config_path = "configs/ppo_metaworld.yaml"
+        elif task_name in DMC_CFGS:
+            config_path = "configs/ppo_dmc.yaml"
+        
+        with open(config_path, "r") as file:
             config = yaml.safe_load(file)
         
         set_seed_everywhere(seed)
