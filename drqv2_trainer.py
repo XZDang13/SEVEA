@@ -93,7 +93,7 @@ class Trainer:
         elif task_name in DMC_CFGS:
             env = setup_dmc_env(task_name, seed, render_mode)
             self.task_env = "dmc"
-            self.eval_steps = 1000
+            self.eval_steps = 500
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
         env = gymnasium.wrappers.AddRenderObservation(env, render_only=True)
         env = gymnasium.wrappers.FrameStackObservation(env, 2)
