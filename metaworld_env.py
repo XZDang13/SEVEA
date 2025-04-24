@@ -6,7 +6,7 @@ from PIL import Image, ImageFilter
 from torchvision import transforms
 import torchvision.transforms.functional as F
 from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
-from config import CFGS
+from config import METAWORLD_CFGS
 from motion_detector import get_motion_detecor
 
 DEFAULT_CAMERA_CONFIG = {
@@ -69,7 +69,7 @@ class VisualWrapper(gymnasium.Wrapper):
         return vector_obs, reward, done, truncate, info
     
 def setup_metaworld_env(task_name:str, seed:int, render_mode:str="rgb_array"):
-    cfgs = CFGS[task_name]
+    cfgs = METAWORLD_CFGS[task_name]
     env_cls = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[cfgs["env_name"]]
     
     motion_detector = get_motion_detecor(task_name)

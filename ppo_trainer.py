@@ -12,6 +12,8 @@ from RLAlg.alg.ppo import PPO
 from RLAlg.utils import set_seed_everywhere
 from RLAlg.buffer.rollout_buffer import RolloutBuffer
 
+from config import METAWORLD_CFGS, DMC_CFGS
+from dmc import setup_dmc_env
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
 from model.encoder import EncoderNet
@@ -27,8 +29,13 @@ def get_train_args():
 
 class Trainer:
     def __init__(self, task_name:str, seed:int):
+
+        if task_name in METAWORLD_CFGS:
+            config_path = "configs/ppo_metaworld.yaml"
+        elif task_name in DMC_CFGS:
+            config_path = "configs/ppo_dmc.yaml"
         
-        with open("configs/ppo.yaml", "r") as file:
+        with open(config_path, "r") as file:
             config = yaml.safe_load(file)
         
         set_seed_everywhere(seed)
@@ -40,9 +47,6 @@ class Trainer:
         
         self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
-        
-        self.task_motions = motions[task_name]
-        self.num_motions = len(self.task_motions) - 1
         
         obs_dim = self.train_envs.single_observation_space.shape
         action_dim = self.train_envs.single_action_space.shape
@@ -71,7 +75,17 @@ class Trainer:
         self.regularization_weight = config["regularization_weight"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
-        env = setup_metaworld_env(task_name, seed, render_mode)
+        if task_name in METAWORLD_CFGS:
+            env = setup_metaworld_env(task_name, seed, render_mode)
+            self.task_env = "metaworld"
+            self.task_motions = motions[task_name]
+            self.num_motions = len(self.task_motions) - 1
+            self.eval_steps = 500
+        elif task_name in DMC_CFGS:
+            env = setup_dmc_env(task_name, seed, render_mode)
+            self.task_env = "dmc"
+            self.eval_steps = 500
+
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
 
         return env
@@ -103,7 +117,8 @@ class Trainer:
         for i in range(self.max_steps):
             action, log_prob, value = self.get_action(obs)
             next_obs, reward, done, timeout, info = self.train_envs.step(action)
-            reward = self.get_motion_reward(info["motion"])
+            if "motion" in info:
+                reward = self.get_motion_reward(info["motion"])
             self.rollout_buffer.add_steps(i, obs, action, log_prob, reward, done, value)
             obs = next_obs
 
@@ -111,18 +126,22 @@ class Trainer:
         self.rollout_buffer.compute_gae(value, gamma=self.gamma, lambda_=self.lambda_)
         
     def eval(self):
+        log_data = {}
         obs, info = self.eval_envs.reset()
         episode_success = 0
-        for i in range(500):
+        for i in range(self.eval_steps):
             action, log_prob, value = self.get_action(obs, True)
             next_obs, reward, done, timeout, info = self.eval_envs.step(action)
-            episode_success += info["success"]
+            if "success" in info:
+                episode_success += info["success"]
             obs = next_obs
             
-        avg_episode_reward = np.mean(info['episode']['r']).item()
-        avg_success_rate = np.mean(episode_success / 500).item()
+        log_data["avg_episode_reward"] = np.mean(info['episode']['r']).item()
+
+        if self.task_env == "metaworld":
+            log_data["avg_success_rate"] = np.mean(episode_success / 500).item()
         
-        return avg_episode_reward, avg_success_rate
+        return log_data
         
         
     def update(self, num_iteration:int, batch_size:int):
@@ -147,13 +166,19 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]['params'], self.max_grad_norm)
                 self.optimizer.step()
                 
-    def log(self, step, avg_reward, avg_success):
+    def log(self, step, log_data):
         time = datetime.now()
-        print(f"[{time}] {step}")
-        print(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
+        avg_reward = log_data.get("avg_episode_reward", 0.0)
+        avg_success = log_data.get("avg_success_rate", None)
+
+        print(f"[{time}] Step {step}")
+        if avg_success is not None:
+            print(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
+        else:
+            print(f"Avg: eval reward is {avg_reward:.3f}")
     
     def train(self):
-        best_success = 0
+        best_record = 0
         print("-------------------------------")
         print(f"task: {self.task_name}, seed: {self.seed}")
         time = datetime.now()
@@ -164,13 +189,17 @@ class Trainer:
             self.update(self.update_iteration, self.batch_size)
             
             if (epoch + 1) % self.eval_frequence == 0:
-                episode_reward, episode_success_rate = self.eval()
-                self.log(epoch+1, episode_reward, episode_success_rate)
+                log_data = self.eval()
+                self.log(epoch+1, log_data)
                 torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ppo/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
 
-                if episode_success_rate > best_success:
-                    best_success = episode_success_rate
-                    torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_best_{self.seed}.pt")
+                episode_success_rate = log_data.get("avg_success_rate", None)
+                episode_reward = log_data.get("avg_episode_reward", None)
+                metric = episode_success_rate if episode_success_rate is not None else episode_reward
+                
+                if metric >= best_record:
+                    best_record = metric
+                    torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ppo/{self.task_name}/actor_best_{self.seed}.pt")
 
         time = datetime.now()
         print(f"[{time}] end")
