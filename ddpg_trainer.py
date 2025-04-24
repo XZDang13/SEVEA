@@ -160,6 +160,8 @@ class Trainer:
         
         
     def update(self, num_iteration:int, batch_size:int):
+        scaler = torch.amp.GradScaler('cuda')
+
         for _ in range(num_iteration):
             batch = self.replay_buffer.sample(batch_size)
             obs_batch = batch["states"].to(self.device)
@@ -168,31 +170,42 @@ class Trainer:
             done_batch = batch["dones"].to(self.device)
             next_obs_batch = batch["next_states"].to(self.device)
 
-            feature_batch = self.encoder(obs_batch, True)
-            with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+            with torch.amp.autocast("cuda"):
+                feature_batch = self.encoder(obs_batch, True)
+                with torch.no_grad():
+                    next_feature_batch = self.encoder(next_obs_batch, True)
 
-            self.encoder_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            critic_loss = DDPGDoubleQ.compute_critic_loss(
-                self.actor, self.critic, self.critic_target, feature_batch, action_batch, reward_batch, next_feature_batch, done_batch, self.std, self.gamma
-            )
-            critic_loss.backward()
-            self.critic_optimizer.step()
-            self.encoder_optimizer.step()
+                self.encoder_optimizer.zero_grad(set_to_none=True)
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                critic_loss = DDPGDoubleQ.compute_critic_loss(
+                    self.actor, self.critic, self.critic_target,
+                    feature_batch, action_batch, reward_batch,
+                    next_feature_batch, done_batch, self.std, self.gamma
+                )
+
+            scaler.scale(critic_loss).backward()
+            scaler.step(self.critic_optimizer)
+            scaler.step(self.encoder_optimizer)
+            scaler.update()
 
             for param in self.critic.parameters():
                 param.requires_grad = False
 
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            actor_loss = DDPGDoubleQ.compute_actor_loss(self.actor, self.critic, feature_batch.detach(), self.std, self.regularization_weight)
-            actor_loss.backward()
-            self.actor_optimizer.step()
+            with torch.amp.autocast("cuda"):
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                actor_loss = DDPGDoubleQ.compute_actor_loss(
+                    self.actor, self.critic, feature_batch.detach(), self.std, self.regularization_weight
+                )
+
+            scaler.scale(actor_loss).backward()
+            scaler.step(self.actor_optimizer)
+            scaler.update()
 
             for param in self.critic.parameters():
                 param.requires_grad = True
 
             DDPGDoubleQ.update_target_param(self.critic, self.critic_target, self.tau)
+
     
     def log(self, step, log_data):
         time = datetime.now()
