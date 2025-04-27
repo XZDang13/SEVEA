@@ -12,9 +12,7 @@ encoder_layers:
 actor_layers:
   - 256
   - 256
-  - 256
 critic_layers:
-  - 256
   - 256
   - 256
 learning_rate: 3.0e-4
