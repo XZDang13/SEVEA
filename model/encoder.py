@@ -60,7 +60,7 @@ class FrameObservationEncoderNet(nn.Module):
             #MLPLayer(1024, feature_dim, F.silu, True),
         )
         
-    def forward(self, x:torch.Tensor, with_act_func:bool=False, aug:bool=False) -> torch.Tensor:
+    def forward(self, x:torch.Tensor, with_act_func:bool=True, aug:bool=False) -> torch.Tensor:
         if aug:
             x = self.aug(x)
         x = self.cnn_layers(x)
