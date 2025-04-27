@@ -21,6 +21,8 @@ import numpy as np
 import torch
 import torch.optim as optim
 import yaml
+import tqdm
+from tqdm import trange
 
 from RLAlg.alg.ppo import PPO
 from RLAlg.utils import set_seed_everywhere
@@ -185,11 +187,11 @@ class Trainer:
         avg_reward = log_data.get("avg_episode_reward", 0.0)
         avg_success = log_data.get("avg_success_rate", None)
 
-        print(f"[{time}] Step {step}")
+        tqdm.tqdm.write(f"[{time}] Step {step}")
         if avg_success is not None:
-            print(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
+            tqdm.tqdm.write(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
         else:
-            print(f"Avg: eval reward is {avg_reward:.3f}")
+            tqdm.tqdm.write(f"Avg: eval reward is {avg_reward:.3f}")
     
     def train(self):
         best_record = 0
@@ -198,7 +200,7 @@ class Trainer:
         time = datetime.now()
         print(f"[{time}] start")
 
-        for epoch in range(self.epochs):
+        for epoch in trange(self.epochs, desc="Training Epochs"):
             self.rollout()
             self.update(self.update_iteration, self.batch_size)
             
