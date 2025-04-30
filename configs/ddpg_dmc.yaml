@@ -8,7 +8,6 @@ encoder_layers:
   - 256
   - 256
   - 256
-  - 256
 actor_layers:
   - 256
   - 256

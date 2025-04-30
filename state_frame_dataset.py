@@ -14,7 +14,7 @@ class PairDataset(Dataset):
         self.data_path = data_path
         self.files = glob.glob(f"{data_path}/json/*.json")
         self.transform = v2.Compose([
-            #v2.ColorJitter(brightness=0.2, hue=0.2),
+            v2.ColorJitter(brightness=0.2, hue=0.2),
             #v2.Resize(112),
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
@@ -42,6 +42,6 @@ class PairDataset(Dataset):
 def get_dataloader(task):
     data_path = f"pair_data/{task}"
     dataset = PairDataset(data_path)
-    dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=16)
+    dataloader = DataLoader(dataset, batch_size=512, shuffle=True, num_workers=16)
 
     return dataloader

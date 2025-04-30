@@ -16,6 +16,7 @@ from dmc import setup_dmc_env
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
 from RLAlg.utils import set_seed_everywhere
+from RLAlg.buffer.replay_buffer import ReplayBuffer
 
 from model.encoder import EncoderNet
 from model.actor import DDPGActorNet
@@ -24,41 +25,13 @@ from model.critic import CriticNet
 def get_train_args():
     parse = argparse.ArgumentParser()
     parse.add_argument('--task', type=str, default='buttonpress', help='the task name')
+    parse.add_argument('--visual', action='store_true', help='visual observation or not')
     #parse.add_argument('--weight_epoch', type=int, default=0, help='weight trained after epoch')
    
     return parse.parse_args()
-
-class PairDataCollector:
-    @staticmethod
-    def save(obs, path):
-        # Ensure the directories exist
-        json_dir = os.path.join(path, "json")
-        img_dir = os.path.join(path, "img")
-        os.makedirs(json_dir, exist_ok=True)
-        os.makedirs(img_dir, exist_ok=True)
-
-        def process_entry(args):
-            state, frame = args
-            step_id = str(uuid4())
-
-            # Save JSON data
-            data = {
-                "step_id": step_id,
-                "state": state.tolist(),
-            }
-            with open(f"{json_dir}/{step_id}.json", "w") as f:
-                json.dump(data, f)
-
-            # Save images
-            for i in range(2):
-                Image.fromarray(frame[i]).save(f"{img_dir}/{step_id}_{i}.png")
-
-        # Use ThreadPool for parallel processing
-        with ThreadPool() as pool:
-            pool.map(process_entry, zip(obs["state"], obs["pixels"]))
         
 class Collector:
-    def __init__(self, task_name:str):
+    def __init__(self, task_name:str, visual:bool=False):
         
         if task_name in METAWORLD_CFGS:
             config_path = "configs/ddpg_metaworld.yaml"
@@ -72,9 +45,11 @@ class Collector:
         
         set_seed_everywhere(0)
         
+        self.visual = visual
         self.seed = 0
         self.task_name = task_name
-        
+        self.epochs = config["epochs"]
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         self.envs = gymnasium.vector.SyncVectorEnv([lambda seed=i : self.setup_env(task_name, seed) for i in range(config["num_envs"])])
@@ -83,6 +58,11 @@ class Collector:
         state_dim = self.envs.single_observation_space["state"].shape[-1:]
         action_dim = self.envs.single_action_space.shape
 
+        if visual:
+            obs_dim = frame_dim
+        else:
+            obs_dim = state_dim
+
         self.num_envs = config["num_envs"]
         
         
@@ -90,13 +70,17 @@ class Collector:
         self.actor = DDPGActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
         self.critic = CriticNet(self.encoder.dim, np.prod(action_dim), config["critic_layers"]).to(self.device)
 
+        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], obs_dim, action_dim)
+
         self.std = 1
 
-        self.path = f"pair_data/{task_name}"
+        if visual:
+            self.path = f"replays/{task_name}/visual"
+        else:
+            self.path = f"replays/{task_name}/state"
 
         if not os.path.exists(self.path):
-            os.makedirs(f"{self.path}/json")
-            os.makedirs(f"{self.path}/img")
+            os.makedirs(self.path)
 
     def load_weight(self):
         weight_file = f"weights/ddpg/{self.task_name}/actor_best_0.pt"
@@ -138,28 +122,44 @@ class Collector:
         
         return action.tolist()
     
+    def get_motion_reward(self, motions:list[str]) -> list[float]:
+        rewards = []
+        for motion in motions:
+            idx = self.task_motions.index(motion)
+            reward = idx / self.num_motions
+            rewards.append(reward)
+
+        return rewards
+    
     def rollout(self, deterministic:bool, random:bool):
         obs, info = self.envs.reset()    
         for step in range(100):
-            PairDataCollector.save(obs, self.path)
             action = self.get_action(obs["state"][:, -1].tolist(), deterministic, random)
-            obs, reward, done, timeout, info = self.envs.step(action)
+            next_obs, reward, done, timeout, info = self.envs.step(action)
+            if "motion" in info:
+                reward = self.get_motion_reward(info["motion"])
+
+            if self.visual:
+                self.replay_buffer.add_steps(obs["pixels"], action, reward, done, next_obs["pixels"])
+            else:
+                self.replay_buffer.add_steps(obs["state"][:, -1], action, reward, done, next_obs["state"][:, -1])
+
+            obs = next_obs
 
     def collect(self):
-        set_deterministic = False
-        total_epoch = 100
-        noise_epoch = int(total_epoch * 0.7)
-        for epoch in trange(total_epoch):
-            self.rollout(set_deterministic, False)
 
-            if epoch >= 70:
-                set_deterministic = True  
+        for epoch in trange(self.epochs, desc="Collect Epochs"):
+            collector.rollout(True, False)
+
+        self.replay_buffer.save(self.path)
             
 if __name__ == '__main__':
     args = get_train_args()
 
-    collector = Collector(args.task)
+    collector = Collector(args.task, args.visual)
 
     collector.load_weight()
+
+    collector.collect()
     
     collector.envs.close()
