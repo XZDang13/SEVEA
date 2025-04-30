@@ -240,18 +240,6 @@ class Trainer:
         print("-------------------------------")
         
 if __name__ == '__main__':
-    NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
-    if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
-        with open(NVIDIA_ICD_CONFIG_PATH, 'w') as f:
-            f.write("""{
-            "file_format_version" : "1.0.0",
-            "ICD" : {
-                "library_path" : "libEGL_nvidia.so.0"
-            }
-        }
-        """)
-            
-    os.environ["MUJOCO_GL"] = "egl"
     
     args = get_train_args()
     weight_folder = f"weights/ppo_visual/{args.task}"
