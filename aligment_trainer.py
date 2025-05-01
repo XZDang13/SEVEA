@@ -77,6 +77,8 @@ class Trainer:
             config = yaml.safe_load(file)
 
 
+        self.epochs = 20
+
         self.task_name = task_name
         self.seed = seed
         self.alg = alg
@@ -100,12 +102,12 @@ class Trainer:
 
         self.model = Alignment(state_encoder, frame_encoder, feature_layer).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3, weight_decay=1e-4)
-        self.scheduler = CosineAnnealingLR(optimizer=self.optimizer, T_max=20)
+        self.scheduler = CosineAnnealingLR(optimizer=self.optimizer, T_max=self.epochs)
         self.dataloader = get_dataloader(task_name)
         self.size = len(self.dataloader.dataset)
 
     def train(self):
-        for _ in trange(10, desc="Epochs"):
+        for _ in trange(self.epochs, desc="Epochs"):
             running_loss = 0.0
             for _, (vectors, frames) in enumerate(self.dataloader):
                 vectors = vectors.to(self.device)

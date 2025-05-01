@@ -187,7 +187,7 @@ class Trainer:
 
                 obs_batch = self.preprpcess(obs_batch)
 
-                feature_batch = self.encoder(obs_batch, False)
+                feature_batch = self.encoder(obs_batch)
                 policy_loss, entropy = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
 
                 value_loss = PPO.compute_clipped_value_loss(self.critic, feature_batch, value_batch, return_batch, self.clip_ratio)

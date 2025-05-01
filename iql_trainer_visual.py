@@ -157,9 +157,9 @@ class Trainer:
             done_batch = batch["dones"].to(self.device)
             next_obs_batch = batch["next_states"].to(self.device)
             
-            feature_batch = self.encoder(obs_batch, True)
+            feature_batch = self.encoder(obs_batch, aug=True)
             with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+                next_feature_batch = self.encoder(next_obs_batch, aug=True)
             
             self.encoder_optimizer.zero_grad(set_to_none=True)
             self.value_optimizer.zero_grad(set_to_none=True)

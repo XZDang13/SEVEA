@@ -189,9 +189,9 @@ class Trainer:
             obs_batch = self.preprpcess(obs_batch)
             next_obs_batch = self.preprpcess(next_obs_batch)
 
-            feature_batch = self.encoder(obs_batch, True)
+            feature_batch = self.encoder(obs_batch, aug=True)
             with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+                next_feature_batch = self.encoder(next_obs_batch, aug=True)
 
             self.encoder_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
