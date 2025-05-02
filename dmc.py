@@ -81,6 +81,7 @@ class DMC(gymnasium.Env):
 def setup_dmc_env(task_name:str, seed:int, render_mode:str="rgb_array"):
 
     cfg = DMC_CFGS[task_name]
-    env = DMC(cfg["domain_name"], cfg["task_name"], seed, render_mode=render_mode, frame_skip=2)
+
+    env = DMC(cfg["domain_name"], cfg["task_name"], seed, render_mode=render_mode, camera_id=cfg["camera"], frame_skip=2)
     
     return env
