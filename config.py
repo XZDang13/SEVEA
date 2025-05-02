@@ -23,34 +23,39 @@ WINDOWOPEN = {
     "state_dim": 39
 }
 
-CHEETAH_RUN = {
-    "domain_name": "cheetah",
-    "task_name": "run",
-    "state_dim": 17
+QUADEUPED_WALK = {
+    "domain_name": "quadruped",
+    "task_name": "walk",
+    "state_dim": 78,
+    "camera":2
 }
 
 REACHER_HARD = {
     "domain_name": "reacher",
     "task_name": "hard",
-    "state_dim": 6
+    "state_dim": 6,
+    "camera":0
 }
 
 HOPPER_HOP = {
     "domain_name": "hopper",
     "task_name": "stand",
-    "state_dim": 15
+    "state_dim": 15,
+    "camera":0
 }
 
 WALKER_STAND = {
     "domain_name": "walker",
     "task_name": "walk",
-    "state_dim": 24
+    "state_dim": 24,
+    "camera":0
 }
 
 FINGER_TURN = {
     "domain_name": "finger",
     "task_name": "turn_hard",
-    "state_dim": 12
+    "state_dim": 12,
+    "camera":0
 }
 
 METAWORLD_CFGS = {
@@ -62,7 +67,7 @@ METAWORLD_CFGS = {
 }
 
 DMC_CFGS = {
-    "cheetah": CHEETAH_RUN,
+    "quadruped": QUADEUPED_WALK,
     "reacher": REACHER_HARD,
     "hopper": HOPPER_HOP,
     "walker": WALKER_STAND,
