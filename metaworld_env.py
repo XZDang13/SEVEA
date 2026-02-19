@@ -5,7 +5,7 @@ from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 from PIL import Image, ImageFilter
 from torchvision import transforms
 import torchvision.transforms.functional as F
-from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
+from metaworld.env_dict import ALL_V3_ENVIRONMENTS_GOAL_OBSERVABLE
 from config import METAWORLD_CFGS
 from motion_detector import get_motion_detecor
 
@@ -70,7 +70,7 @@ class VisualWrapper(gymnasium.Wrapper):
     
 def setup_metaworld_env(task_name:str, seed:int, render_mode:str="rgb_array"):
     cfgs = METAWORLD_CFGS[task_name]
-    env_cls = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[cfgs["env_name"]]
+    env_cls = ALL_V3_ENVIRONMENTS_GOAL_OBSERVABLE[cfgs["env_name"]]
     
     motion_detector = get_motion_detecor(task_name)
     env = VisualWrapper(env_cls(render_mode=render_mode), motion_detector, seed)

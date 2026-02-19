@@ -1,45 +1,86 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from RLAlg.nn.layers import CriticHead, make_mlp_layers, MLPLayer
+from RLAlg.nn.layers import make_mlp_layers, CriticHead, NormPosition
+from RLAlg.nn.steps import ValueStep
 
-class ValueNet(nn.Module):
-    def __init__(self, feature_dim:int, hidden_dims:list[int]):
+class PPOCritic(nn.Module):
+    def __init__(self, in_dim:int, hidden_dims:list[int], norm_position:NormPosition=NormPosition.POST):
         super().__init__()
-        self.layers, dim = make_mlp_layers(feature_dim, hidden_dims, F.silu, True)
 
-        self.value = CriticHead(dim)
+        #if norm is set true, the model will adapt layer norm
+        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=nn.SiLU(), norm_position=norm_position)
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        self.head = CriticHead(feature_dim)
+
+    def forward(self, x:torch.Tensor) -> ValueStep:
         x = self.layers(x)
 
-        value = self.value(x)
+        step:ValueStep = self.head(x)
 
-        return value
-    
+        return step
+
 class QNet(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int, hidden_dims:list[int]):
+    def __init__(self, in_dim:int, hidden_dims:list[int], norm_position:NormPosition=NormPosition.POST):
         super().__init__()
-        self.layers, in_dim = make_mlp_layers(feature_dim+action_dim, hidden_dims, F.silu, True)
-        self.critic_layer = CriticHead(in_dim)
 
-    def forward(self, feature:torch.Tensor, action:torch.Tensor) -> torch.Tensor:
-        x = torch.cat([feature, action], 1)
+        #if norm is set true, the model will adapt layer norm
+        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=nn.SiLU(), norm_position=norm_position)
+
+        self.head = CriticHead(feature_dim)
+
+    def forward(self, x:torch.Tensor) -> ValueStep:
         x = self.layers(x)
-       
-        q = self.critic_layer(x)
 
-        return q
+        step:ValueStep = self.head(x)
+
+        return step
     
-class CriticNet(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int, hidden_dims:list[int]):
+class DDPGCritic(nn.Module):
+    def __init__(self, in_dim:int, action_dim:int, hidden_dims:list[int], norm_position:NormPosition=NormPosition.POST):
         super().__init__()
-        self.qnet_1 = QNet(feature_dim, action_dim, hidden_dims)
-        self.qnet_2 = QNet(feature_dim, action_dim, hidden_dims)
+        
+        self.critic_1 = QNet(in_dim+action_dim, hidden_dims, norm_position=norm_position)
+        self.critic_2 = QNet(in_dim+action_dim, hidden_dims, norm_position=norm_position)
 
-    def forward(self, feature:torch.Tensor, action:torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        q1 = self.qnet_1(feature, action)
-        q2 = self.qnet_2(feature, action)
+    def forward(self, x:torch.Tensor, action:torch.Tensor) -> tuple[ValueStep, ValueStep]:
+        x = torch.cat([x, action], dim=1)
 
-        return q1, q2
+        step_1:ValueStep = self.critic_1(x)
+        step_2:ValueStep = self.critic_2(x)
+
+        return step_1, step_2
+    
+class IQLCritic(nn.Module):
+    def __init__(self, in_dim:int, action_dim:int, hidden_dims:list[int], norm_position:NormPosition=NormPosition.POST):
+        super().__init__()
+        
+        self.critic_1 = QNet(in_dim+action_dim, hidden_dims, norm_position=norm_position)
+        self.critic_2 = QNet(in_dim+action_dim, hidden_dims, norm_position=norm_position)
+
+    def forward(self, x:torch.Tensor, action:torch.Tensor) -> tuple[ValueStep, ValueStep]:
+        x = torch.cat([x, action], dim=1)
+
+        step_1:ValueStep = self.critic_1(x)
+        step_2:ValueStep = self.critic_2(x)
+
+        return step_1, step_2
+    
+class IQLValue(nn.Module):
+    def __init__(self, in_dim:int, hidden_dims:list[int], norm_position:NormPosition=NormPosition.POST):
+        super().__init__()
+
+        #if norm is set true, the model will adapt layer norm
+        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=nn.SiLU(), norm_position=norm_position)
+
+        self.head = CriticHead(feature_dim)
+
+    def forward(self, x:torch.Tensor) -> ValueStep:
+        x = self.layers(x)
+
+        step:ValueStep = self.head(x)
+
+        return step

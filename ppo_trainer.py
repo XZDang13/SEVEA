@@ -1,5 +1,5 @@
 import os
-
+'''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
     with open(NVIDIA_ICD_CONFIG_PATH, 'w') as f:
@@ -12,7 +12,7 @@ if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
     """)
         
 os.environ["MUJOCO_GL"] = "egl"
-
+'''
 import argparse
 
 from datetime import datetime
@@ -24,17 +24,20 @@ import yaml
 import tqdm
 from tqdm import trange
 
-from RLAlg.alg.ppo import PPO
-from RLAlg.utils import set_seed_everywhere
-from RLAlg.buffer.rollout_buffer import RolloutBuffer
-
 from config import METAWORLD_CFGS, DMC_CFGS
 from dmc import setup_dmc_env
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
-from model.encoder import EncoderNet
-from model.actor import PPOActorNet
-from model.critic import ValueNet
+
+from RLAlg.alg.ppo import PPO
+from RLAlg.utils import set_seed_everywhere
+from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae
+from RLAlg.nn.layers import NormPosition
+from RLAlg.nn.steps import StochasticContinuousPolicyStep, ValueStep
+
+from model.encoder import StateObservationEncoderNet
+from model.actor import PPOActor
+from model.critic import PPOCritic
 
 def get_train_args():
     parse = argparse.ArgumentParser()
@@ -67,16 +70,25 @@ class Trainer:
         obs_dim = self.train_envs.single_observation_space.shape
         action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = EncoderNet(np.prod(obs_dim), config["encoder_layers"]).to(self.device)
-        self.actor = PPOActorNet(self.encoder.dim, np.prod(action_dim), config["actor_layers"]).to(self.device)
-        self.critic = ValueNet(self.encoder.dim, config["value_layers"]).to(self.device)
+        self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
+        self.actor = PPOActor(self.encoder.feature_dim, np.prod(action_dim), config["actor_layers"], norm_position=NormPosition.POST).to(self.device)
+        self.critic = PPOCritic(self.encoder.feature_dim, config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
 
         self.optimizer = optim.Adam(
             list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters()), 
             lr=config["learning_rate"]
         )
         
-        self.rollout_buffer = RolloutBuffer(config["num_envs"],  config["max_steps"], obs_dim, action_dim)
+        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_steps"], device=self.device)
+        self.replay_buffer.create_storage_space("observations", obs_dim, torch.float32)
+        self.replay_buffer.create_storage_space("actions", action_dim, torch.float32)
+        self.replay_buffer.create_storage_space("log_probs", (), torch.float32)
+        self.replay_buffer.create_storage_space("rewards", (), torch.float32)
+        self.replay_buffer.create_storage_space("values", (), torch.float32)
+        self.replay_buffer.create_storage_space("dones", (), torch.float32)
+        
+        self.batch_keys = ["observations", "actions", "log_probs", "rewards", "values", "returns", "advantages"]
+        
         self.max_steps =  config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]
@@ -119,27 +131,51 @@ class Trainer:
     def get_action(self, obs_batch:list[list[float]], determine:bool=False):
         obs_batch = torch.as_tensor(obs_batch).float().to(self.device)
         obs_batch = self.encoder(obs_batch)
-        pi, action, log_prob = self.actor(obs_batch)
+        actor_step:StochasticContinuousPolicyStep = self.actor(obs_batch)
+        value_step:ValueStep = self.critic(obs_batch)
         
         if determine:
-            action = pi.mean
-        
-        value = self.critic(obs_batch)
+            action = actor_step.mean
+        else:
+            action = actor_step.action
+        log_prob = actor_step.log_prob
 
-        return action.cpu().tolist(), log_prob.cpu().tolist(), value.cpu().tolist()
+        value = value_step.value
+
+        return action, log_prob, value
     
     def rollout(self):
         obs, info = self.train_envs.reset()
         for i in range(self.max_steps):
             action, log_prob, value = self.get_action(obs)
-            next_obs, reward, done, timeout, info = self.train_envs.step(action)
+            next_obs, reward, done, timeout, info = self.train_envs.step(action.numpy())
             if "motion" in info:
                 reward = self.get_motion_reward(info["motion"])
-            self.rollout_buffer.add_steps(i, obs, action, log_prob, reward, done, value)
+            record = {
+                "observations": obs,
+                "actions": action,
+                "log_probs": log_prob,
+                "rewards": reward,
+                "values": value,
+                "dones": done
+            }
+            
+            self.replay_buffer.add_records(record)
+            
             obs = next_obs
-
+            
         _, _, value = self.get_action(obs)
-        self.rollout_buffer.compute_gae(value, gamma=self.gamma, lambda_=self.lambda_)
+        returns, advantages = compute_gae(
+            self.replay_buffer.data["rewards"],
+            self.replay_buffer.data["values"],
+            self.replay_buffer.data["dones"],
+            value,
+            self.gamma,
+            self.lambda_
+            )
+        
+        self.replay_buffer.add_storage("returns", returns)
+        self.replay_buffer.add_storage("advantages", advantages)
         
         
     def eval(self):
@@ -148,7 +184,7 @@ class Trainer:
         episode_success = 0
         for i in range(self.eval_steps):
             action, log_prob, value = self.get_action(obs, True)
-            next_obs, reward, done, timeout, info = self.eval_envs.step(action)
+            next_obs, reward, done, timeout, info = self.eval_envs.step(action.numpy())
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
@@ -163,8 +199,8 @@ class Trainer:
         
     def update(self, num_iteration:int, batch_size:int):
         for _ in range(num_iteration):
-            for batch in self.rollout_buffer.batch_sample(batch_size):
-                obs_batch = batch["states"].to(self.device)
+            for batch in self.replay_buffer.sample_batchs(self.batch_keys, batch_size):
+                obs_batch = batch["observations"].to(self.device)
                 action_batch = batch["actions"].to(self.device)
                 log_prob_batch = batch["log_probs"].to(self.device)
                 value_batch = batch["values"].to(self.device)
@@ -172,11 +208,15 @@ class Trainer:
                 advantage_batch = batch["advantages"].to(self.device)
 
                 feature_batch = self.encoder(obs_batch, True)
-                policy_loss, entropy = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
+                policy_loss_dict = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
 
-                value_loss = PPO.compute_clipped_value_loss(self.critic, feature_batch, value_batch, return_batch, self.clip_ratio)
-                #value_loss = PPO.compute_value_loss(self.critic, feature_batch, return_batch)
-
+                policy_loss = policy_loss_dict["loss"]
+                entropy = policy_loss_dict["entropy"]
+                kl_divergence = policy_loss_dict["kl_divergence"]
+                
+                value_loss_dict = PPO.compute_clipped_value_loss(self.critic, feature_batch, value_batch, return_batch, self.clip_ratio)
+                value_loss = value_loss_dict["loss"]
+                
                 loss = policy_loss + value_loss * self.value_loss_weight - entropy * self.entropy_weight
 
                 self.optimizer.zero_grad()

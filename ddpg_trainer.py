@@ -1,5 +1,4 @@
 import os
-import glob
 '''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
@@ -14,7 +13,6 @@ if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
         
 os.environ["MUJOCO_GL"] = "egl"
 '''
-
 import argparse
 
 from datetime import datetime
@@ -27,80 +25,56 @@ import tqdm
 from tqdm import trange
 
 from config import METAWORLD_CFGS, DMC_CFGS
-
-from RLAlg.alg.iql import IQL
-from RLAlg.utils import set_seed_everywhere
-from RLAlg.buffer.replay_buffer import ReplayBuffer
-from RLAlg.nn.layers import NormPosition
-from RLAlg.nn.steps import StochasticContinuousPolicyStep
-
 from dmc import setup_dmc_env
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
+from RLAlg.alg.ddpg_double_q import DDPGDoubleQ
+from RLAlg.utils import set_seed_everywhere
+from RLAlg.buffer.replay_buffer import ReplayBuffer
+from RLAlg.nn.layers import NormPosition
+from RLAlg.nn.steps import DeterministicContinuousPolicyStep
+
+
 from model.encoder import StateObservationEncoderNet
-from model.actor import IQLActor
-from model.critic import IQLCritic, IQLValue
+from model.actor import DDPGActor
+from model.critic import DDPGCritic
 
 def get_train_args():
     parse = argparse.ArgumentParser()
     parse.add_argument('--task', type=str, default='buttonpress', help='the task name')
     parse.add_argument('--seed', type=int, default=0, help='the random seed to reproduce results')
-    parse.add_argument('--replay-file', type=str, default=None, help='optional replay file path override')
+    parse.add_argument('--save-buffer', action='store_true', help='If set, save the buffer to disk after training')
    
     return parse.parse_args()
 
 class Trainer:
-    def __init__(self, task_name:str, seed:int, replay_file:str|None=None):
-        
+    def __init__(self, task_name:str, seed:int):
+
         if task_name in METAWORLD_CFGS:
-            config_path = "configs/iql_metaworld.yaml"
+            config_path = "configs/ddpg_metaworld.yaml"
         elif task_name in DMC_CFGS:
-            config_path = "configs/iql_dmc.yaml"
+            config_path = "configs/ddpg_dmc.yaml"
         
         with open(config_path, "r") as file:
             config = yaml.safe_load(file)
         
         set_seed_everywhere(seed)
         
+        self.seed = seed
+        self.task_name = task_name
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        self.task_name = task_name
-        self.seed = seed
-        
+        self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
         
-        obs_dim = self.eval_envs.single_observation_space.shape
-        action_dim = self.eval_envs.single_action_space.shape
+        obs_dim = self.train_envs.single_observation_space.shape
+        action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = StateObservationEncoderNet(
-            np.prod(obs_dim),
-            config["encoder_layers"],
-            norm_position=NormPosition.POST,
-            dropout_prob=config["encoder_dropout_prob"],
-        ).to(self.device)
-        self.actor = IQLActor(
-            self.encoder.feature_dim,
-            np.prod(action_dim),
-            config["actor_layers"],
-            norm_position=NormPosition.POST,
-        ).to(self.device)
-        self.value = IQLValue(
-            self.encoder.feature_dim,
-            config["value_layers"],
-            norm_position=NormPosition.POST,
-        ).to(self.device)
-        self.critic = IQLCritic(
-            self.encoder.feature_dim,
-            np.prod(action_dim),
-            config["critic_layers"],
-            norm_position=NormPosition.POST,
-        ).to(self.device)
-        self.critic_target = IQLCritic(
-            self.encoder.feature_dim,
-            np.prod(action_dim),
-            config["critic_layers"],
-            norm_position=NormPosition.POST,
-        ).to(self.device)
+        self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
+        self.actor = DDPGActor(self.encoder.feature_dim, np.prod(action_dim), config["actor_layers"], norm_position=NormPosition.POST).to(self.device)
+        self.critic = DDPGCritic(self.encoder.feature_dim, np.prod(action_dim), config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
+        self.critic_target = DDPGCritic(self.encoder.feature_dim, np.prod(action_dim), config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         for param in self.critic_target.parameters():
@@ -108,45 +82,26 @@ class Trainer:
 
         self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=config["learning_rate"])
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config["learning_rate"])
-        self.value_optimizer = optim.Adam(self.value.parameters(), lr=config["learning_rate"])
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
         
-        self.replays_path = config["replay_path"]
-        replay_path = replay_file or self._resolve_replay_path()
-        self.replay_buffer = ReplayBuffer(1, 1, device=self.device)
-        self.replay_buffer.load(replay_path, device=self.device)
-        print(f"[IQL] replay file: {replay_path}")
+        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], device=self.device)
+        self.replay_buffer.create_storage_space("observations", obs_dim, torch.float32)
+        self.replay_buffer.create_storage_space("next_observations", obs_dim, torch.float32)
+        self.replay_buffer.create_storage_space("actions", action_dim, torch.float32)
+        self.replay_buffer.create_storage_space("rewards", (), torch.float32)
+        self.replay_buffer.create_storage_space("dones", (), torch.float32)
         
         self.batch_keys = ["observations", "next_observations", "actions", "rewards", "dones"]
+        
+        self.max_steps = config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]
         self.batch_size = config["batch_size"]
         self.eval_frequence = config["eval_frequence"]
         self.gamma = config["gamma"]
         self.tau = config["tau"]
-        self.expectile = config["expectile"]
-        self.beta = config["beta"]
-
-    def _resolve_replay_path(self) -> str:
-        task_dir = os.path.join(self.replays_path, self.task_name)
-        candidates = [
-            os.path.join(task_dir, f"buffer_{self.seed}.pt"),
-            os.path.join(task_dir, "buffer.pt"),
-            os.path.join(task_dir, "state", "replays.pt"),
-        ]
-        for path in candidates:
-            if os.path.isfile(path):
-                return path
-
-        pt_files = glob.glob(os.path.join(task_dir, "*.pt"))
-        if pt_files:
-            pt_files.sort(key=os.path.getmtime, reverse=True)
-            return pt_files[0]
-
-        raise FileNotFoundError(
-            f"No replay file found for task '{self.task_name}' in '{task_dir}'. "
-            "Expected one of: buffer_<seed>.pt, buffer.pt, state/replays.pt, or any .pt file in task directory."
-        )
+        self.regularization_weight = config["regularization_weight"]
+        self.std = config["std"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
         if task_name in METAWORLD_CFGS:
@@ -173,21 +128,46 @@ class Trainer:
         return rewards
     
     @torch.no_grad()
-    def get_action(self, obs:list[list[float]]):
-        obs = torch.as_tensor(obs).float().to(self.device)
-        obs = self.encoder(obs)
-        actor_step: StochasticContinuousPolicyStep = self.actor(obs)
-        action = actor_step.mean
+    def get_action(self, obs_batch, deterministic, random):
+        obs_batch = torch.as_tensor(obs_batch, dtype=torch.float32).to(self.device)
+        obs_batch = self.encoder(obs_batch)
+        actor_step:DeterministicContinuousPolicyStep = self.actor(obs_batch, self.std)
+        if deterministic:
+            action = actor_step.mean
+        else:    
+            action = actor_step.pi.rsample()
+
+        if random:
+            action = actor_step.mean.uniform_(-1, 1) * self.max_action
         
-        return action.cpu().tolist()
+        return action
     
+    def rollout(self):
+        obs, info = self.train_envs.reset()
+        for i in range(self.max_steps):
+            action = self.get_action(obs, False, False)
+            next_obs, reward, done, timeout, info = self.train_envs.step(action.numpy())
+            if "motion" in info:
+                reward = self.get_motion_reward(info["motion"])
+                
+            record = {
+                "observations": obs,
+                "next_observations": next_obs,
+                "actions": action,
+                "rewards": reward,
+                "dones": done
+            }
+            
+            self.replay_buffer.add_records(record)
+            obs = next_obs
+        
     def eval(self):
         log_data = {}
         obs, info = self.eval_envs.reset()
         episode_success = 0
         for i in range(self.eval_steps):
-            action = self.get_action(obs)
-            next_obs, reward, done, timeout, info = self.eval_envs.step(action)
+            action = self.get_action(obs, True, False)
+            next_obs, reward, done, timeout, info = self.eval_envs.step(action.numpy())
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
@@ -201,57 +181,50 @@ class Trainer:
         
         
     def update(self, num_iteration:int, batch_size:int):
+
         for _ in range(num_iteration):
             batch = self.replay_buffer.sample_batch(self.batch_keys, batch_size)
             obs_batch = batch["observations"].to(self.device)
+            next_obs_batch = batch["next_observations"].to(self.device)
             action_batch = batch["actions"].to(self.device)
             reward_batch = batch["rewards"].to(self.device)
             done_batch = batch["dones"].to(self.device)
-            next_obs_batch = batch["next_observations"].to(self.device)
+
             
             feature_batch = self.encoder(obs_batch, True)
             with torch.no_grad():
                 next_feature_batch = self.encoder(next_obs_batch, True)
-            
+
             self.encoder_optimizer.zero_grad(set_to_none=True)
-            self.value_optimizer.zero_grad(set_to_none=True)
-            value_loss_dict = IQL.compute_value_loss(self.value, self.critic_target, feature_batch, action_batch, self.expectile)
-            value_loss = value_loss_dict["loss"]
-            value_loss.backward()
-            self.value_optimizer.step()
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            critic_loss_dict = DDPGDoubleQ.compute_critic_loss(
+                self.actor, self.critic, self.critic_target, feature_batch, action_batch, reward_batch, next_feature_batch, done_batch, self.std, self.gamma
+            )
+            
+            critic_loss = critic_loss_dict["loss"]
+            q1 = critic_loss_dict["q1"]
+            q2 = critic_loss_dict["q2"]
+            q_target = critic_loss_dict["q_target"]
+            
+            critic_loss.backward()
+            self.critic_optimizer.step()
             self.encoder_optimizer.step()
 
-            
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            critic_loss_dict = IQL.compute_critic_loss(
-                self.value,
-                self.critic,
-                feature_batch.detach(),
-                action_batch,
-                reward_batch,
-                done_batch,
-                next_feature_batch,
-                self.gamma,
-            )
-            critic_loss = critic_loss_dict["loss"]
-            critic_loss.backward()
-            self.critic_optimizer.step()    
-            
+            for param in self.critic.parameters():
+                param.requires_grad = False
+
             self.actor_optimizer.zero_grad(set_to_none=True)
-            actor_loss_dict = IQL.compute_policy_loss(
-                self.actor,
-                self.value,
-                self.critic_target,
-                feature_batch.detach(),
-                action_batch,
-                self.beta,
-            )
-            actor_loss = actor_loss_dict["loss"]
-            actor_loss.backward()
+            policy_loss_dict = DDPGDoubleQ.compute_policy_loss(self.actor, self.critic, feature_batch.detach(), self.std, self.regularization_weight)
+            policy_loss = policy_loss_dict["loss"]
+            policy_loss.backward()
             self.actor_optimizer.step()
-            
-            IQL.update_target_param(self.critic, self.critic_target, self.tau)
-                
+
+            for param in self.critic.parameters():
+                param.requires_grad = True
+
+            DDPGDoubleQ.update_target_param(self.critic, self.critic_target, self.tau)
+
+    
     def log(self, step, log_data):
         time = datetime.now()
         avg_reward = log_data.get("avg_episode_reward", 0.0)
@@ -270,12 +243,16 @@ class Trainer:
         time = datetime.now()
         print(f"[{time}] start")
         for epoch in trange(self.epochs, desc="Training Epochs"):
+            self.rollout()
             self.update(self.update_iteration, self.batch_size)
+            
+            mix = np.clip(epoch/self.epochs, 0, 1)
+            self.std = (1-mix) * 1 + mix * 0.1
             
             if (epoch + 1) % self.eval_frequence == 0:
                 log_data = self.eval()
                 self.log(epoch+1, log_data)
-                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/iql/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
+                torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_{self.seed}_{epoch+1}.pt")
 
                 episode_success_rate = log_data.get("avg_success_rate", None)
                 episode_reward = log_data.get("avg_episode_reward", None)
@@ -283,19 +260,26 @@ class Trainer:
                 
                 if metric >= best_record:
                     best_record = metric
-                    torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/iql/{self.task_name}/actor_best_{self.seed}.pt")
+                    torch.save([self.encoder.state_dict(), self.actor.state_dict(), self.critic.state_dict()], f"weights/ddpg/{self.task_name}/actor_best_{self.seed}.pt")
 
         time = datetime.now()
         print(f"[{time}] end")
 
         print("-------------------------------")
-        
+
 if __name__ == '__main__':
+    
     args = get_train_args()
-    weight_folder = f"weights/iql/{args.task}"
+    weight_folder = f"weights/ddpg/{args.task}"
         
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
 
-    trainer = Trainer(args.task, args.seed, args.replay_file)
+    trainer = Trainer(args.task, args.seed)
     trainer.train()
+
+    if args.save_buffer:
+        replay_dir = f"replays/{args.task}"
+        os.makedirs(replay_dir, exist_ok=True)
+        replay_path = os.path.join(replay_dir, f"buffer_{args.seed}.pt")
+        trainer.replay_buffer.save(replay_path)
