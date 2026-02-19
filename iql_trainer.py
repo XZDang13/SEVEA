@@ -179,7 +179,7 @@ class Trainer:
         actor_step: StochasticContinuousPolicyStep = self.actor(obs)
         action = actor_step.mean
         
-        return action.cpu().tolist()
+        return action
     
     def eval(self):
         log_data = {}
@@ -187,7 +187,7 @@ class Trainer:
         episode_success = 0
         for i in range(self.eval_steps):
             action = self.get_action(obs)
-            next_obs, reward, done, timeout, info = self.eval_envs.step(action)
+            next_obs, reward, done, timeout, info = self.eval_envs.step(action.cpu().numpy())
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs

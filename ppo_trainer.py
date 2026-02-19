@@ -148,7 +148,7 @@ class Trainer:
         obs, info = self.train_envs.reset()
         for i in range(self.max_steps):
             action, log_prob, value = self.get_action(obs)
-            next_obs, reward, done, timeout, info = self.train_envs.step(action.numpy())
+            next_obs, reward, done, timeout, info = self.train_envs.step(action.cpu().numpy())
             if "motion" in info:
                 reward = self.get_motion_reward(info["motion"])
             record = {
@@ -184,7 +184,7 @@ class Trainer:
         episode_success = 0
         for i in range(self.eval_steps):
             action, log_prob, value = self.get_action(obs, True)
-            next_obs, reward, done, timeout, info = self.eval_envs.step(action.numpy())
+            next_obs, reward, done, timeout, info = self.eval_envs.step(action.cpu().numpy())
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
