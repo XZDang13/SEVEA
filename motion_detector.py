@@ -55,10 +55,10 @@ class DRAWEROPEN:
         is_above_target_aligned = my_utils.DetectMotion.is_above(xpos, "gripper", "object_1", aligned=True)
 
         is_target_moving = my_utils.DetectMotion.is_moving(xpos, next_xpos, "object_1", 0.001)
-        is_target_moving_to_goal = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "object_1", "goal", 0.5)
+        is_target_moving_to_goal = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "object_1", "goal", 0.75)
         
-        is_gripper_moving_to_target = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "gripper", "object_1", 0.5)
-        is_gripper_moving_to_above_target = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "gripper", "object_1", 0.6, offset=[0, 0, 0.05])
+        is_gripper_moving_to_target = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "gripper", "object_1", 0.75)
+        is_gripper_moving_to_above_target = my_utils.DetectMotion.is_moving_to(xpos, next_xpos, "gripper", "object_1", 0.75, offset=[0, 0, 0.05])
         is_gripper_moving = my_utils.DetectMotion.is_moving(xpos, next_xpos, "gripper", 0.001)
         is_grasping = my_utils.DetectMotion.is_grasping(xpos, next_xpos)
 

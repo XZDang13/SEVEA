@@ -20,4 +20,4 @@ batch_size: 1000
 gamma: 0.98
 tau: 0.005
 std: 1.0
-regularization_weight: 1.0e-3
+regularization_weight: 1.0e-2
