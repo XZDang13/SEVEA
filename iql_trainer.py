@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 '''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
@@ -66,6 +67,8 @@ class Trainer:
         
         self.task_name = task_name
         self.seed = seed
+        self.eval_log_path = f"weights/iql/{self.task_name}/eval_{self.seed}.jsonl"
+        os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
         
@@ -262,6 +265,20 @@ class Trainer:
             tqdm.tqdm.write(f"Avg: eval success rate is: {avg_success:.3f}, eval reward is {avg_reward:.3f}")
         else:
             tqdm.tqdm.write(f"Avg: eval reward is {avg_reward:.3f}")
+        self.save_eval_log(step, log_data)
+
+    def save_eval_log(self, step, log_data):
+        record = {
+            "time": datetime.now().isoformat(),
+            "step": int(step),
+            "avg_episode_reward": float(log_data.get("avg_episode_reward", 0.0))
+        }
+        avg_success = log_data.get("avg_success_rate", None)
+        if avg_success is not None:
+            record["avg_success_rate"] = float(avg_success)
+
+        with open(self.eval_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
     
     def train(self):
         best_record = 0
