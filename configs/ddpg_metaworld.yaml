@@ -10,7 +10,9 @@ encoder_layers:
 actor_layers:
   - 256
   - 256
+  - 256
 critic_layers:
+  - 256
   - 256
   - 256
 encoder_dropout_prob: 0.2

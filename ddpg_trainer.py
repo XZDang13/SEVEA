@@ -23,6 +23,7 @@ import torch
 import torch.optim as optim
 import yaml
 import tqdm
+from torchvision.transforms import v2
 from tqdm import trange
 
 from config import METAWORLD_CFGS, DMC_CFGS
@@ -36,7 +37,7 @@ from RLAlg.nn.layers import NormPosition
 from RLAlg.nn.steps import DeterministicContinuousPolicyStep
 
 
-from model.encoder import StateObservationEncoderNet
+from model.encoder import StateObservationEncoderNet, VisualObservationEncoderNet
 from model.actor import DDPGActor
 from model.critic import DDPGCritic
 
@@ -45,11 +46,12 @@ def get_train_args():
     parse.add_argument('--task', type=str, default='buttonpress', help='the task name')
     parse.add_argument('--seed', type=int, default=0, help='the random seed to reproduce results')
     parse.add_argument('--save-buffer', action='store_true', help='If set, save the buffer to disk after training')
+    parse.add_argument('--visual', action='store_true', help='use visual observations (rendered frame stack)')
    
     return parse.parse_args()
 
 class Trainer:
-    def __init__(self, task_name:str, seed:int):
+    def __init__(self, task_name:str, seed:int, visual:bool=False):
 
         if task_name in METAWORLD_CFGS:
             config_path = "configs/ddpg_metaworld.yaml"
@@ -63,18 +65,34 @@ class Trainer:
         
         self.seed = seed
         self.task_name = task_name
+        self.visual = visual
         self.eval_log_path = f"weights/ddpg/{self.task_name}/eval_{self.seed}.jsonl"
         os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pixel_transform = None
+        if self.visual:
+            self.pixel_transform = v2.Compose([
+                v2.Lambda(
+                    lambda x: x.permute(0, 1, 4, 2, 3).reshape(
+                        x.shape[0], -1, x.shape[2], x.shape[3]
+                    )
+                )
+            ])
         
         self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
         
-        obs_dim = self.train_envs.single_observation_space.shape
+        obs_space = self.train_envs.single_observation_space
+        obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
         action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
+        if self.visual:
+            encoder_input = torch.zeros((1, *obs_dim), dtype=torch.uint8)
+            in_channel = self.pixel_transform(encoder_input).shape[1]
+            self.encoder = VisualObservationEncoderNet(in_channel).to(self.device)
+        else:
+            self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
         self.actor = DDPGActor(self.encoder.feature_dim, np.prod(action_dim), config["actor_layers"], norm_position=NormPosition.POST).to(self.device)
         self.critic = DDPGCritic(self.encoder.feature_dim, np.prod(action_dim), config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
         self.critic_target = DDPGCritic(self.encoder.feature_dim, np.prod(action_dim), config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
@@ -88,8 +106,9 @@ class Trainer:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
         
         self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], device=self.device)
-        self.replay_buffer.create_storage_space("observations", obs_dim, torch.float32)
-        self.replay_buffer.create_storage_space("next_observations", obs_dim, torch.float32)
+        obs_dtype = torch.uint8 if self.visual else torch.float32
+        self.replay_buffer.create_storage_space("observations", obs_dim, obs_dtype)
+        self.replay_buffer.create_storage_space("next_observations", obs_dim, obs_dtype)
         self.replay_buffer.create_storage_space("actions", action_dim, torch.float32)
         self.replay_buffer.create_storage_space("rewards", (), torch.float32)
         self.replay_buffer.create_storage_space("dones", (), torch.float32)
@@ -107,6 +126,7 @@ class Trainer:
         self.std = config["std"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
+        render_mode = "rgb_array" if self.visual else render_mode
         if task_name in METAWORLD_CFGS:
             env = setup_metaworld_env(task_name, seed, render_mode)
             self.task_env = "metaworld"
@@ -117,9 +137,27 @@ class Trainer:
             env = setup_dmc_env(task_name, seed, render_mode)
             self.task_env = "dmc"
             self.eval_steps = 500
+        if self.visual:
+            env = gymnasium.wrappers.AddRenderObservation(env, render_only=False)
+            env = gymnasium.wrappers.FrameStackObservation(env, 2)
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
 
         return env
+
+    def _select_observation(self, obs):
+        if self.visual:
+            return obs["pixels"]
+        return obs
+
+    def _observation_to_tensor(self, obs) -> torch.Tensor:
+        if self.visual:
+            obs = torch.as_tensor(obs, dtype=torch.uint8)
+            obs = self.pixel_transform(obs)
+            obs = obs.to(self.device, dtype=torch.float32) / 255.0
+            return obs
+        else:
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+            return obs.reshape(obs.shape[0], -1)
     
     def get_motion_reward(self, motions:list[str]) -> list[float]:
         rewards = []
@@ -132,7 +170,7 @@ class Trainer:
     
     @torch.no_grad()
     def get_action(self, obs_batch, deterministic, random):
-        obs_batch = torch.as_tensor(obs_batch, dtype=torch.float32).to(self.device)
+        obs_batch = self._observation_to_tensor(obs_batch)
         obs_batch = self.encoder(obs_batch)
         actor_step:DeterministicContinuousPolicyStep = self.actor(obs_batch, self.std)
         if deterministic:
@@ -147,9 +185,11 @@ class Trainer:
     
     def rollout(self):
         obs, info = self.train_envs.reset()
+        obs = self._select_observation(obs)
         for i in range(self.max_steps):
             action = self.get_action(obs, False, False)
             next_obs, reward, done, timeout, info = self.train_envs.step(action.cpu().numpy())
+            next_obs = self._select_observation(next_obs)
             if "motion" in info:
                 reward = self.get_motion_reward(info["motion"])
                 
@@ -167,10 +207,12 @@ class Trainer:
     def eval(self):
         log_data = {}
         obs, info = self.eval_envs.reset()
+        obs = self._select_observation(obs)
         episode_success = 0
         for i in range(self.eval_steps):
             action = self.get_action(obs, True, False)
             next_obs, reward, done, timeout, info = self.eval_envs.step(action.cpu().numpy())
+            next_obs = self._select_observation(next_obs)
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
@@ -187,16 +229,17 @@ class Trainer:
 
         for _ in range(num_iteration):
             batch = self.replay_buffer.sample_batch(self.batch_keys, batch_size)
-            obs_batch = batch["observations"].to(self.device)
-            next_obs_batch = batch["next_observations"].to(self.device)
+            obs_batch = self._observation_to_tensor(batch["observations"])
+            next_obs_batch = self._observation_to_tensor(batch["next_observations"])
             action_batch = batch["actions"].to(self.device)
             reward_batch = batch["rewards"].to(self.device)
             done_batch = batch["dones"].to(self.device)
 
+            aug = True
             
-            feature_batch = self.encoder(obs_batch, True)
+            feature_batch = self.encoder(obs_batch, aug)
             with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+                next_feature_batch = self.encoder(next_obs_batch, aug)
 
             self.encoder_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
@@ -292,7 +335,7 @@ if __name__ == '__main__':
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
 
-    trainer = Trainer(args.task, args.seed)
+    trainer = Trainer(args.task, args.seed, args.visual)
     trainer.train()
 
     if args.save_buffer:

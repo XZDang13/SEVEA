@@ -25,6 +25,7 @@ import torch
 import torch.optim as optim
 import yaml
 import tqdm
+from torchvision.transforms import v2
 from tqdm import trange
 
 from config import METAWORLD_CFGS, DMC_CFGS
@@ -38,7 +39,7 @@ from RLAlg.nn.steps import StochasticContinuousPolicyStep
 from dmc import setup_dmc_env
 from metaworld_env import setup_metaworld_env
 from motion_detector import motions
-from model.encoder import StateObservationEncoderNet
+from model.encoder import StateObservationEncoderNet, VisualObservationEncoderNet
 from model.actor import IQLActor
 from model.critic import IQLCritic, IQLValue
 
@@ -47,11 +48,12 @@ def get_train_args():
     parse.add_argument('--task', type=str, default='buttonpress', help='the task name')
     parse.add_argument('--seed', type=int, default=0, help='the random seed to reproduce results')
     parse.add_argument('--replay-file', type=str, default=None, help='optional replay file path override')
+    parse.add_argument('--visual', action='store_true', help='use visual observations (rendered frame stack)')
    
     return parse.parse_args()
 
 class Trainer:
-    def __init__(self, task_name:str, seed:int, replay_file:str|None=None):
+    def __init__(self, task_name:str, seed:int, replay_file:str|None=None, visual:bool=False):
         
         if task_name in METAWORLD_CFGS:
             config_path = "configs/iql_metaworld.yaml"
@@ -64,23 +66,39 @@ class Trainer:
         set_seed_everywhere(seed)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pixel_transform = None
+        if visual:
+            self.pixel_transform = v2.Compose([
+                v2.Lambda(
+                    lambda x: x.permute(0, 1, 4, 2, 3).reshape(
+                        x.shape[0], -1, x.shape[2], x.shape[3]
+                    )
+                )
+            ])
         
         self.task_name = task_name
         self.seed = seed
+        self.visual = visual
         self.eval_log_path = f"weights/iql/{self.task_name}/eval_{self.seed}.jsonl"
         os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
         
-        obs_dim = self.eval_envs.single_observation_space.shape
+        obs_space = self.eval_envs.single_observation_space
+        obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
         action_dim = self.eval_envs.single_action_space.shape
         
-        self.encoder = StateObservationEncoderNet(
-            np.prod(obs_dim),
-            config["encoder_layers"],
-            norm_position=NormPosition.POST,
-            dropout_prob=config["encoder_dropout_prob"],
-        ).to(self.device)
+        if self.visual:
+            encoder_input = torch.zeros((1, *obs_dim), dtype=torch.uint8)
+            in_channel = self.pixel_transform(encoder_input).shape[1]
+            self.encoder = VisualObservationEncoderNet(in_channel).to(self.device)
+        else:
+            self.encoder = StateObservationEncoderNet(
+                np.prod(obs_dim),
+                config["encoder_layers"],
+                norm_position=NormPosition.POST,
+                dropout_prob=config["encoder_dropout_prob"],
+            ).to(self.device)
         self.actor = IQLActor(
             self.encoder.feature_dim,
             np.prod(action_dim),
@@ -132,11 +150,14 @@ class Trainer:
 
     def _resolve_replay_path(self) -> str:
         task_dir = os.path.join(self.replays_path, self.task_name)
-        candidates = [
+        candidates = []
+        if self.visual:
+            candidates.append(os.path.join(task_dir, "visual", "replays.pt"))
+        candidates.extend([
             os.path.join(task_dir, f"buffer_{self.seed}.pt"),
             os.path.join(task_dir, "buffer.pt"),
             os.path.join(task_dir, "state", "replays.pt"),
-        ]
+        ])
         for path in candidates:
             if os.path.isfile(path):
                 return path
@@ -148,10 +169,11 @@ class Trainer:
 
         raise FileNotFoundError(
             f"No replay file found for task '{self.task_name}' in '{task_dir}'. "
-            "Expected one of: buffer_<seed>.pt, buffer.pt, state/replays.pt, or any .pt file in task directory."
+            "Expected one of: visual/replays.pt, buffer_<seed>.pt, buffer.pt, state/replays.pt, or any .pt file in task directory."
         )
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
+        render_mode = "rgb_array" if self.visual else render_mode
         if task_name in METAWORLD_CFGS:
             env = setup_metaworld_env(task_name, seed, render_mode)
             self.task_env = "metaworld"
@@ -162,9 +184,27 @@ class Trainer:
             env = setup_dmc_env(task_name, seed, render_mode)
             self.task_env = "dmc"
             self.eval_steps = 500
+        if self.visual:
+            env = gymnasium.wrappers.AddRenderObservation(env, render_only=False)
+            env = gymnasium.wrappers.FrameStackObservation(env, 2)
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
 
         return env
+
+    def _select_observation(self, obs):
+        if self.visual:
+            return obs["pixels"]
+        return obs
+
+    def _observation_to_tensor(self, obs) -> torch.Tensor:
+        if self.visual:
+            obs = torch.as_tensor(obs, dtype=torch.uint8)
+            obs = self.pixel_transform(obs)
+            obs = obs.to(self.device, dtype=torch.float32) / 255.0
+            return obs
+        else:
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+            return obs.reshape(obs.shape[0], -1)
     
     def get_motion_reward(self, motions:list[str]) -> list[float]:
         rewards = []
@@ -177,7 +217,7 @@ class Trainer:
     
     @torch.no_grad()
     def get_action(self, obs:list[list[float]]):
-        obs = torch.as_tensor(obs).float().to(self.device)
+        obs = self._observation_to_tensor(obs)
         obs = self.encoder(obs)
         actor_step: StochasticContinuousPolicyStep = self.actor(obs)
         action = actor_step.mean
@@ -187,10 +227,12 @@ class Trainer:
     def eval(self):
         log_data = {}
         obs, info = self.eval_envs.reset()
+        obs = self._select_observation(obs)
         episode_success = 0
         for i in range(self.eval_steps):
             action = self.get_action(obs)
             next_obs, reward, done, timeout, info = self.eval_envs.step(action.cpu().numpy())
+            next_obs = self._select_observation(next_obs)
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
@@ -206,15 +248,19 @@ class Trainer:
     def update(self, num_iteration:int, batch_size:int):
         for _ in range(num_iteration):
             batch = self.replay_buffer.sample_batch(self.batch_keys, batch_size)
-            obs_batch = batch["observations"].to(self.device)
+            obs_batch = self._observation_to_tensor(batch["observations"])
             action_batch = batch["actions"].to(self.device)
             reward_batch = batch["rewards"].to(self.device)
             done_batch = batch["dones"].to(self.device)
-            next_obs_batch = batch["next_observations"].to(self.device)
+            next_obs_batch = self._observation_to_tensor(batch["next_observations"])
             
-            feature_batch = self.encoder(obs_batch, True)
+            aug = True
+            if self.visual:
+                aug = False
+                
+            feature_batch = self.encoder(obs_batch, aug)
             with torch.no_grad():
-                next_feature_batch = self.encoder(next_obs_batch, True)
+                next_feature_batch = self.encoder(next_obs_batch, aug)
             
             self.encoder_optimizer.zero_grad(set_to_none=True)
             self.value_optimizer.zero_grad(set_to_none=True)
@@ -314,5 +360,5 @@ if __name__ == '__main__':
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
 
-    trainer = Trainer(args.task, args.seed, args.replay_file)
+    trainer = Trainer(args.task, args.seed, args.replay_file, args.visual)
     trainer.train()

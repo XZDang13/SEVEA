@@ -23,6 +23,7 @@ import torch
 import torch.optim as optim
 import yaml
 import tqdm
+from torchvision.transforms import v2
 from tqdm import trange
 
 from config import METAWORLD_CFGS, DMC_CFGS
@@ -36,7 +37,7 @@ from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae
 from RLAlg.nn.layers import NormPosition
 from RLAlg.nn.steps import StochasticContinuousPolicyStep, ValueStep
 
-from model.encoder import StateObservationEncoderNet
+from model.encoder import StateObservationEncoderNet, VisualObservationEncoderNet
 from model.actor import PPOActor
 from model.critic import PPOCritic
 
@@ -44,11 +45,12 @@ def get_train_args():
     parse = argparse.ArgumentParser()
     parse.add_argument('--task', type=str, default='buttonpress', help='the task name')
     parse.add_argument('--seed', type=int, default=0, help='the random seed to reproduce results')
+    parse.add_argument('--visual', action='store_true', help='use visual observations (rendered frame stack)')
    
     return parse.parse_args()
 
 class Trainer:
-    def __init__(self, task_name:str, seed:int):
+    def __init__(self, task_name:str, seed:int, visual:bool=False):
 
         if task_name in METAWORLD_CFGS:
             config_path = "configs/ppo_metaworld.yaml"
@@ -61,19 +63,35 @@ class Trainer:
         set_seed_everywhere(seed)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pixel_transform = None
+        if visual:
+            self.pixel_transform = v2.Compose([
+                v2.Lambda(
+                    lambda x: x.permute(0, 1, 4, 2, 3).reshape(
+                        x.shape[0], -1, x.shape[2], x.shape[3]
+                    )
+                )
+            ])
         
         self.task_name = task_name
         self.seed = seed
+        self.visual = visual
         self.eval_log_path = f"weights/ppo/{self.task_name}/eval_{self.seed}.jsonl"
         os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
         self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
         self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
         
-        obs_dim = self.train_envs.single_observation_space.shape
+        obs_space = self.train_envs.single_observation_space
+        obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
         action_dim = self.train_envs.single_action_space.shape
         
-        self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
+        if self.visual:
+            encoder_input = torch.zeros((1, *obs_dim), dtype=torch.uint8)
+            in_channel = self.pixel_transform(encoder_input).shape[1]
+            self.encoder = VisualObservationEncoderNet(in_channel).to(self.device)
+        else:
+            self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
         self.actor = PPOActor(self.encoder.feature_dim, np.prod(action_dim), config["actor_layers"], norm_position=NormPosition.POST).to(self.device)
         self.critic = PPOCritic(self.encoder.feature_dim, config["critic_layers"], norm_position=NormPosition.POST).to(self.device)
 
@@ -83,7 +101,8 @@ class Trainer:
         )
         
         self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_steps"], device=self.device)
-        self.replay_buffer.create_storage_space("observations", obs_dim, torch.float32)
+        obs_dtype = torch.uint8 if self.visual else torch.float32
+        self.replay_buffer.create_storage_space("observations", obs_dim, obs_dtype)
         self.replay_buffer.create_storage_space("actions", action_dim, torch.float32)
         self.replay_buffer.create_storage_space("log_probs", (), torch.float32)
         self.replay_buffer.create_storage_space("rewards", (), torch.float32)
@@ -106,6 +125,7 @@ class Trainer:
         self.regularization_weight = config["regularization_weight"]
     
     def setup_env(self, task_name:str, seed:int, render_mode:str|None = None) -> gymnasium.Env:
+        render_mode = "rgb_array" if self.visual else render_mode
         if task_name in METAWORLD_CFGS:
             env = setup_metaworld_env(task_name, seed, render_mode)
             self.task_env = "metaworld"
@@ -116,10 +136,28 @@ class Trainer:
             env = setup_dmc_env(task_name, seed, render_mode)
             self.task_env = "dmc"
             self.eval_steps = 500
+        if self.visual:
+            env = gymnasium.wrappers.AddRenderObservation(env, render_only=False)
+            env = gymnasium.wrappers.FrameStackObservation(env, 2)
 
         env = gymnasium.wrappers.RecordEpisodeStatistics(env)
 
         return env
+
+    def _select_observation(self, obs):
+        if self.visual:
+            return obs["pixels"]
+        return obs
+
+    def _observation_to_tensor(self, obs) -> torch.Tensor:
+        if self.visual:
+            obs = torch.as_tensor(obs, dtype=torch.uint8)
+            obs = self.pixel_transform(obs)
+            obs = obs.to(self.device, dtype=torch.float32) / 255.0
+            return obs
+        else:
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+            return obs.reshape(obs.shape[0], -1)
     
     def get_motion_reward(self, motions:list[str]) -> list[float]:
         rewards = []
@@ -132,7 +170,7 @@ class Trainer:
     
     @torch.no_grad()
     def get_action(self, obs_batch:list[list[float]], determine:bool=False):
-        obs_batch = torch.as_tensor(obs_batch).float().to(self.device)
+        obs_batch = self._observation_to_tensor(obs_batch)
         obs_batch = self.encoder(obs_batch)
         actor_step:StochasticContinuousPolicyStep = self.actor(obs_batch)
         value_step:ValueStep = self.critic(obs_batch)
@@ -149,9 +187,11 @@ class Trainer:
     
     def rollout(self):
         obs, info = self.train_envs.reset()
+        obs = self._select_observation(obs)
         for i in range(self.max_steps):
             action, log_prob, value = self.get_action(obs)
             next_obs, reward, done, timeout, info = self.train_envs.step(action.cpu().numpy())
+            next_obs = self._select_observation(next_obs)
             if "motion" in info:
                 reward = self.get_motion_reward(info["motion"])
             record = {
@@ -184,10 +224,12 @@ class Trainer:
     def eval(self):
         log_data = {}
         obs, info = self.eval_envs.reset()
+        obs = self._select_observation(obs)
         episode_success = 0
         for i in range(self.eval_steps):
             action, log_prob, value = self.get_action(obs, True)
             next_obs, reward, done, timeout, info = self.eval_envs.step(action.cpu().numpy())
+            next_obs = self._select_observation(next_obs)
             if "success" in info:
                 episode_success += info["success"]
             obs = next_obs
@@ -203,14 +245,18 @@ class Trainer:
     def update(self, num_iteration:int, batch_size:int):
         for _ in range(num_iteration):
             for batch in self.replay_buffer.sample_batchs(self.batch_keys, batch_size):
-                obs_batch = batch["observations"].to(self.device)
+                obs_batch = self._observation_to_tensor(batch["observations"])
                 action_batch = batch["actions"].to(self.device)
                 log_prob_batch = batch["log_probs"].to(self.device)
                 value_batch = batch["values"].to(self.device)
                 return_batch = batch["returns"].to(self.device)
                 advantage_batch = batch["advantages"].to(self.device)
 
-                feature_batch = self.encoder(obs_batch, True)
+                aug = True
+                if self.visual:
+                    aug = False
+                    
+                feature_batch = self.encoder(obs_batch, aug)
                 policy_loss_dict = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
 
                 policy_loss = policy_loss_dict["loss"]
@@ -291,5 +337,5 @@ if __name__ == '__main__':
     if not os.path.exists(weight_folder):
         os.makedirs(weight_folder)
 
-    trainer = Trainer(args.task, args.seed)
+    trainer = Trainer(args.task, args.seed, args.visual)
     trainer.train()
