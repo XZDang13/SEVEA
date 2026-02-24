@@ -87,7 +87,17 @@ class Trainer:
         
         obs_space = self.eval_envs.single_observation_space
         obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
-        action_dim = self.eval_envs.single_action_space.shape
+        action_space = self.eval_envs.single_action_space
+        action_dim = action_space.shape
+        action_low = np.asarray(action_space.low, dtype=np.float32)
+        action_high = np.asarray(action_space.high, dtype=np.float32)
+        if not np.all(np.isfinite(action_low)) or not np.all(np.isfinite(action_high)):
+            raise ValueError("IQL requires finite action bounds.")
+        if not np.allclose(action_low, -action_high, atol=1e-6):
+            raise ValueError(
+                f"IQL squashed policy expects symmetric action bounds, got low={action_low}, high={action_high}"
+            )
+        self.max_action = torch.as_tensor(action_high, dtype=torch.float32, device=self.device)
         
         if self.visual:
             encoder_input = torch.zeros((1, *obs_dim), dtype=torch.uint8)
@@ -104,6 +114,7 @@ class Trainer:
             self.encoder.feature_dim,
             np.prod(action_dim),
             config["actor_layers"],
+            max_action=self.max_action,
             norm_position=NormPosition.POST,
         ).to(self.device)
         self.value = IQLValue(
