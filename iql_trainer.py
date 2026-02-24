@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+import math
 '''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
@@ -133,9 +134,11 @@ class Trainer:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
         
         self.replays_path = config["replay_path"]
+        self.max_buffer_size = int(config.get("max_buffer_size", 0))
         replay_path = replay_file or self._resolve_replay_path()
         self.replay_buffer = ReplayBuffer(1, 1, device=self.device)
         self.replay_buffer.load(replay_path, device=self.device)
+        self._limit_replay_buffer_size()
         print(f"[IQL] replay file: {replay_path}")
         
         self.batch_keys = ["observations", "next_observations", "actions", "rewards", "dones"]
@@ -147,6 +150,45 @@ class Trainer:
         self.tau = config["tau"]
         self.expectile = config["expectile"]
         self.beta = config["beta"]
+
+    def _limit_replay_buffer_size(self) -> None:
+        if self.max_buffer_size <= 0:
+            return
+        if not getattr(self.replay_buffer, "data", None):
+            return
+
+        sample_tensor = next(iter(self.replay_buffer.data.values()))
+        num_envs = int(getattr(self.replay_buffer, "num_envs", 1))
+
+        # Vectorized replay format: [steps, num_envs, ...]
+        if sample_tensor.ndim >= 2 and sample_tensor.shape[1] == num_envs:
+            before_steps = int(getattr(self.replay_buffer, "current_size", sample_tensor.shape[0]))
+            before_samples = before_steps * num_envs
+            keep_steps = max(1, math.ceil(self.max_buffer_size / num_envs))
+            if keep_steps >= sample_tensor.shape[0]:
+                return
+            for key, value in self.replay_buffer.data.items():
+                self.replay_buffer.data[key] = value[:keep_steps].contiguous()
+            if hasattr(self.replay_buffer, "steps"):
+                self.replay_buffer.steps = keep_steps
+            if hasattr(self.replay_buffer, "current_size"):
+                self.replay_buffer.current_size = min(before_steps, keep_steps)
+            after_samples = int(getattr(self.replay_buffer, "current_size", keep_steps)) * num_envs
+            print(f"[IQL] replay clipped: {before_samples} -> {after_samples} samples (max {self.max_buffer_size})")
+            return
+
+        # Flat replay format: [samples, ...]
+        before_samples = sample_tensor.shape[0]
+        keep_samples = max(1, self.max_buffer_size)
+        if keep_samples >= before_samples:
+            return
+        for key, value in self.replay_buffer.data.items():
+            self.replay_buffer.data[key] = value[:keep_samples].contiguous()
+        if hasattr(self.replay_buffer, "steps"):
+            self.replay_buffer.steps = keep_samples
+        if hasattr(self.replay_buffer, "current_size"):
+            self.replay_buffer.current_size = min(int(getattr(self.replay_buffer, "current_size", keep_samples)), keep_samples)
+        print(f"[IQL] replay clipped: {before_samples} -> {keep_samples} samples (max {self.max_buffer_size})")
 
     def _resolve_replay_path(self) -> str:
         task_dir = os.path.join(self.replays_path, self.task_name)

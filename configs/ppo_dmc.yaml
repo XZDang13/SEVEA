@@ -1,5 +1,6 @@
 num_envs: 20
 max_steps: 250
+max_buffer_size: 5000
 epochs: 200
 eval_frequence: 40
 encoder_layers:

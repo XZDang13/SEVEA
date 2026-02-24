@@ -1,5 +1,6 @@
 import os
 import json
+import math
 '''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
@@ -76,11 +77,12 @@ class Trainer:
         self.task_name = task_name
         self.seed = seed
         self.visual = visual
+        self.num_envs = config["num_envs"]
         self.eval_log_path = f"weights/ppo/{self.task_name}/eval_{self.seed}.jsonl"
         os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
-        self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
-        self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
+        self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(self.num_envs)])
+        self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(self.num_envs)])
         
         obs_space = self.train_envs.single_observation_space
         obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
@@ -100,7 +102,10 @@ class Trainer:
             lr=config["learning_rate"]
         )
         
-        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_steps"], device=self.device)
+        total_buffer_size = int(config.get("max_buffer_size", config["max_steps"] * self.num_envs))
+        self.max_steps = max(1, math.ceil(total_buffer_size / self.num_envs))
+        print(self.max_steps)
+        self.replay_buffer = ReplayBuffer(self.num_envs, self.max_steps, device=self.device)
         obs_dtype = torch.uint8 if self.visual else torch.float32
         self.replay_buffer.create_storage_space("observations", obs_dim, obs_dtype)
         self.replay_buffer.create_storage_space("actions", action_dim, torch.float32)
@@ -111,7 +116,6 @@ class Trainer:
         
         self.batch_keys = ["observations", "actions", "log_probs", "rewards", "values", "returns", "advantages"]
         
-        self.max_steps =  config["max_steps"]
         self.epochs = config["epochs"]
         self.update_iteration = config["update_iteration"]
         self.batch_size = config["batch_size"]

@@ -1,5 +1,6 @@
 import os
 import json
+import math
 '''
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
 if not os.path.exists(NVIDIA_ICD_CONFIG_PATH):
@@ -66,6 +67,7 @@ class Trainer:
         self.seed = seed
         self.task_name = task_name
         self.visual = visual
+        self.num_envs = config["num_envs"]
         self.eval_log_path = f"weights/ddpg/{self.task_name}/eval_{self.seed}.jsonl"
         os.makedirs(os.path.dirname(self.eval_log_path), exist_ok=True)
         
@@ -80,8 +82,8 @@ class Trainer:
                 )
             ])
         
-        self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(config["num_envs"])])
-        self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(config["num_envs"])])
+        self.train_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset) for i in range(self.num_envs)])
+        self.eval_envs = gymnasium.vector.SyncVectorEnv([lambda offset=i : self.setup_env(task_name, seed=self.seed+offset+1000) for i in range(self.num_envs)])
         
         obs_space = self.train_envs.single_observation_space
         obs_dim = obs_space["pixels"].shape if self.visual else obs_space.shape
@@ -105,7 +107,9 @@ class Trainer:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config["learning_rate"])
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config["learning_rate"])
         
-        self.replay_buffer = ReplayBuffer(config["num_envs"], config["max_buffer_size"], device=self.device)
+        self.max_buffer_size = int(config["max_buffer_size"])
+        replay_steps = max(1, math.ceil(self.max_buffer_size / self.num_envs))
+        self.replay_buffer = ReplayBuffer(self.num_envs, replay_steps, device=self.device)
         obs_dtype = torch.uint8 if self.visual else torch.float32
         self.replay_buffer.create_storage_space("observations", obs_dim, obs_dtype)
         self.replay_buffer.create_storage_space("next_observations", obs_dim, obs_dtype)
