@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from r3m import load_r3m
 from RLAlg.nn.layers import make_mlp_layers, Conv2DLayer, MLPLayer, NormPosition
 
 class StateObservationEncoderNet(nn.Module):
@@ -78,4 +79,73 @@ class VisualObservationEncoderNet(nn.Module):
         x = torch.flatten(x, start_dim=1)
         x = self.projection(x)
         
+        return x
+    
+class R3MObservationEncoderNet(nn.Module):
+    def __init__(self, in_channel:int=6):
+        super().__init__()
+        
+        self.feature_dim = 512
+        
+        self.r3m = load_r3m('resnet18')
+        self._expand_input_conv(in_channel)
+        self._expand_input_norm(in_channel)
+
+    def _expand_input_conv(self, in_channel:int) -> None:
+        backbone = self.r3m.module if hasattr(self.r3m, "module") else self.r3m
+        conv1: nn.Conv2d = backbone.convnet.conv1
+        old_in_channel = conv1.in_channels
+
+        if in_channel == old_in_channel:
+            return
+        if in_channel < old_in_channel:
+            raise ValueError(
+                f"R3M input channels must be >= {old_in_channel}, got {in_channel}"
+            )
+        if in_channel % old_in_channel != 0:
+            raise ValueError(
+                f"CCE requires in_channel to be {old_in_channel}m, got {in_channel}"
+            )
+
+        expansion_ratio = in_channel // old_in_channel
+
+        new_conv = nn.Conv2d(
+            in_channels=in_channel,
+            out_channels=conv1.out_channels,
+            kernel_size=conv1.kernel_size,
+            stride=conv1.stride,
+            padding=conv1.padding,
+            bias=conv1.bias is not None,
+        ).to(device=conv1.weight.device, dtype=conv1.weight.dtype)
+
+        with torch.no_grad():
+            expanded_weight = conv1.weight.repeat(1, expansion_ratio, 1, 1)
+            expanded_weight.mul_(1.0 / expansion_ratio)
+            new_conv.weight.copy_(expanded_weight)
+            if conv1.bias is not None:
+                new_conv.bias.copy_(conv1.bias)
+
+        backbone.convnet.conv1 = new_conv
+
+    def _expand_input_norm(self, in_channel:int) -> None:
+        backbone = self.r3m.module if hasattr(self.r3m, "module") else self.r3m
+        normlayer = backbone.normlayer
+        old_norm_channels = len(normlayer.mean)
+
+        if in_channel == old_norm_channels:
+            return
+        if in_channel % old_norm_channels != 0:
+            raise ValueError(
+                f"CCE norm expansion requires in_channel to be {old_norm_channels}m, got {in_channel}"
+            )
+
+        expansion_ratio = in_channel // old_norm_channels
+        expanded_mean = list(normlayer.mean) * expansion_ratio
+        expanded_std = list(normlayer.std) * expansion_ratio
+        backbone.normlayer = type(normlayer)(mean=expanded_mean, std=expanded_std)
+        
+    def forward(self, obs:torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x = self.r3m(obs)
+            
         return x

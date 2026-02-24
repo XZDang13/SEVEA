@@ -38,7 +38,7 @@ from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae
 from RLAlg.nn.layers import NormPosition
 from RLAlg.nn.steps import StochasticContinuousPolicyStep, ValueStep
 
-from model.encoder import StateObservationEncoderNet, VisualObservationEncoderNet
+from model.encoder import R3MObservationEncoderNet, StateObservationEncoderNet
 from model.actor import PPOActor
 from model.critic import PPOCritic
 
@@ -100,7 +100,7 @@ class Trainer:
         if self.visual:
             encoder_input = torch.zeros((1, *obs_dim), dtype=torch.uint8)
             in_channel = self.pixel_transform(encoder_input).shape[1]
-            self.encoder = VisualObservationEncoderNet(in_channel).to(self.device)
+            self.encoder = R3MObservationEncoderNet(in_channel).to(self.device)
         else:
             self.encoder = StateObservationEncoderNet(np.prod(obs_dim), config["encoder_layers"], norm_position=NormPosition.POST, dropout_prob=config["encoder_dropout_prob"]).to(self.device)
         self.actor = PPOActor(
@@ -172,7 +172,8 @@ class Trainer:
         if self.visual:
             obs = torch.as_tensor(obs, dtype=torch.uint8)
             obs = self.pixel_transform(obs)
-            obs = obs.to(self.device, dtype=torch.float32) / 255.0
+            # R3M.forward() already converts [0, 255] -> [0, 1].
+            obs = obs.to(self.device, dtype=torch.float32)
             return obs
         else:
             obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
@@ -275,8 +276,11 @@ class Trainer:
                 aug = True
                 if self.visual:
                     aug = False
-                    
-                feature_batch = self.encoder(obs_batch, aug)
+
+                if self.visual:
+                    feature_batch = self.encoder(obs_batch)
+                else:
+                    feature_batch = self.encoder(obs_batch, aug)
                 policy_loss_dict = PPO.compute_policy_loss(self.actor, log_prob_batch, feature_batch, action_batch, advantage_batch, self.clip_ratio, self.regularization_weight)
 
                 policy_loss = policy_loss_dict["loss"]

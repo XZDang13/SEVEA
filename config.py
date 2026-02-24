@@ -37,14 +37,14 @@ REACHER_HARD = {
     "camera":0
 }
 
-HOPPER_HOP = {
+HOPPER_STAND = {
     "domain_name": "hopper",
     "task_name": "stand",
     "state_dim": 15,
     "camera":0
 }
 
-WALKER_STAND = {
+WALKER_WALK = {
     "domain_name": "walker",
     "task_name": "walk",
     "state_dim": 24,
@@ -69,7 +69,7 @@ METAWORLD_CFGS = {
 DMC_CFGS = {
     "quadruped": QUADEUPED_WALK,
     "reacher": REACHER_HARD,
-    "hopper": HOPPER_HOP,
-    "walker": WALKER_STAND,
+    "hopper": HOPPER_STAND,
+    "walker": WALKER_WALK,
     "finger": FINGER_TURN
 }
